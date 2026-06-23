@@ -1,0 +1,6 @@
+# tests/ — test harness home (runner: vitest, listed as a dev dep).
+# Convention (real tests arrive with the code they cover, per build order §11):
+#   - unit/        services + repositories in isolation (mock the injected deps)
+#   - integration/ Express app via supertest + an in-memory/ephemeral Mongo;
+#                  Socket.io flows via a socket.io-client harness
+# The app is built without listen() in src/app.js specifically so it is importable here.

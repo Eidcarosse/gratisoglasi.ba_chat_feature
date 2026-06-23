@@ -1,0 +1,50 @@
+{
+  "name": "marketplace-chat",
+  "version": "0.1.0",
+  "description": "Marketplace chat backend — modular monolith (Express · Socket.io · MongoDB), repository-seamed for a later ScyllaDB swap and realtime-gateway extraction.",
+  "type": "module",
+  "main": "src/server.js",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "nodemon",
+    "lint": "eslint src",
+    "lint:fix": "eslint src --fix",
+    "format": "prettier --write \"src/**/*.js\"",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.600.0",
+    "@aws-sdk/s3-request-presigner": "^3.600.0",
+    "bcrypt": "^5.1.1",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "helmet": "^7.1.0",
+    "jsonwebtoken": "^9.0.2",
+    "mongoose": "^8.4.0",
+    "pino": "^9.1.0",
+    "pino-http": "^10.1.0",
+    "prom-client": "^15.1.2",
+    "socket.io": "^4.7.5",
+    "uuid": "^9.0.1",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "eslint": "^9.4.0",
+    "nodemon": "^3.1.2",
+    "prettier": "^3.3.0",
+    "supertest": "^7.0.0",
+    "vitest": "^1.6.0"
+  },
+  "//LATER_dependencies": {
+    "_comment": "Add when the §10 triggers fire — not installed at MVP.",
+    "redis": "multi-process / presence / rate-limits",
+    "@socket.io/redis-adapter": "cross-node socket pub/sub",
+    "firebase-admin": "FCM push (notifications)",
+    "@parse/node-apn": "APNs push (notifications)",
+    "cassandra-driver": "ScyllaDB message repository impl"
+  }
+}

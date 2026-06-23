@@ -1,0 +1,6 @@
+# jobs/ — LATER (doc §10). Queue workers, not built at MVP.
+# When the triggers fire, background workers live here:
+#   - push fan-out (FCM/APNs) once notify() moves onto a queue
+#   - search indexing (Meilisearch/Elastic) hooked off messageService writes
+#   - cleanup / housekeeping (typing TTLs, stale devices)
+# Kept in git so the seam is visible; remove this file when the first worker lands.
