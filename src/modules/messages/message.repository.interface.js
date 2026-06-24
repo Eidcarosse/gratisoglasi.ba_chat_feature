@@ -4,12 +4,25 @@
  * every message store must satisfy. The shape is chosen on purpose to match exactly what
  * ScyllaDB will need (partition by conversationId, clustering by id/time-bucket).
  *
- * Methods:
- *   append(message)                                   // idempotent on (conversationId, clientMessageId)
- *   findByConversation(conversationId, {before, limit}) // keyset pagination, newest-first
- *   findByClientMessageId(conversationId, clientMessageId) // dedup lookup
- *   getById(id)
- *
  * Today: MongoMessageRepository. Later: ScyllaMessageRepository — SAME interface (doc §5).
  * Implementations must NOT hold business logic.
  */
+/* eslint-disable no-unused-vars */
+export class IMessageRepository {
+  // Idempotent on (conversationId, clientMessageId). Returns { message, created }.
+  async append(message) {
+    throw new Error('not implemented');
+  }
+  // Keyset pagination, newest-first.
+  async findByConversation(conversationId, { before, limit } = {}) {
+    throw new Error('not implemented');
+  }
+  async findByClientMessageId(conversationId, clientMessageId) {
+    throw new Error('not implemented');
+  }
+  async getById(id) {
+    throw new Error('not implemented');
+  }
+}
+
+export default IMessageRepository;
