@@ -99,12 +99,14 @@ Health checks: `GET /healthz` (liveness, no DB) · `GET /readyz` (BOTH Mongo con
 | Trigger | Add | Seam it slots into |
 |---|---|---|
 | Multi-process / 2nd droplet | Redis + `@socket.io/redis-adapter`; `presence.store.redis.js` | room-scoped emits + `IPresenceStore` already abstracted |
-| Offline users miss messages | FCM/APNs via `push.provider.js`; `notify()` → queue worker | `devices` model + `notify()` seam exist |
+| High push volume / receipts | move `notify()` onto a queue worker; poll Expo receipts | Expo push via `push.provider.js` + `notify()` seam already send inline |
 | High message volume (~1yr) | `message.repository.scylla.js`; dual-write → backfill → cutover | `IMessageRepository` already abstracts all message access |
 | Realtime needs independent scaling | extract `realtime/` gateway into its own deployable | transport/service boundary already strict |
 
-> **Status:** MVP implemented end-to-end (loaders, two-connection DB, gratis read-only
-> integration, auth verifier seam, conversations with snapshots, messages + keyset history,
-> realtime gateway, presence, typing, uploads, receipts) with integration tests (`npm test`).
-> The ScyllaDB message repo, Redis presence store, and FCM/APNs push provider remain header-only
-> placeholders behind their existing seams.
+> **Status:** Implemented end-to-end (loaders, two-connection DB, gratis read-only integration,
+> auth verifier seam, conversations with snapshots, messages + keyset history, realtime gateway,
+> presence, typing, uploads, receipts, **unsend (delete-for-everyone), delete-conversation
+> (hide-for-me), mute, Expo push notifications + device registration, and a 7-day TTL that
+> auto-deletes conversations and their messages**) with integration tests (`npm test`).
+> The ScyllaDB message repo and Redis presence store remain header-only placeholders behind their
+> existing seams.

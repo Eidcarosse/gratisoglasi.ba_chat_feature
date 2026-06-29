@@ -23,6 +23,11 @@ export class IMessageRepository {
   async getById(id) {
     throw new Error('not implemented');
   }
+  // Unsend for everyone: tombstone the message (set deletedAt, clear body+attachments). Returns
+  // the updated doc, or null if not found. Idempotency/authorization live in the service.
+  async softDelete(conversationId, messageId) {
+    throw new Error('not implemented');
+  }
 }
 
 export default IMessageRepository;

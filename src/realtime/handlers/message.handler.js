@@ -17,24 +17,11 @@ import {
   z,
   objectIdString,
   objectId,
-  messageType,
-  messageBody,
-  clientMessageId,
-  attachment,
+  sendMessageShape,
+  refineSend,
 } from '../../common/validation/index.js';
 
-const sendSchema = z
-  .object({
-    conversationId: objectIdString,
-    clientMessageId,
-    type: messageType,
-    body: messageBody.optional(),
-    attachments: z.array(attachment).optional(),
-  })
-  .refine((d) => d.type !== 'text' || (d.body && d.body.length > 0), {
-    message: 'Text messages require a body',
-    path: ['body'],
-  });
+const sendSchema = refineSend(z.object({ conversationId: objectIdString, ...sendMessageShape }));
 
 const deliveredSchema = z.object({ conversationId: objectIdString, messageId: objectIdString });
 const readSchema = z.object({ conversationId: objectIdString, upToMessageId: objectId.optional() });

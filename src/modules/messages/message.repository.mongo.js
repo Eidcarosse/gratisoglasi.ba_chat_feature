@@ -50,6 +50,15 @@ export class MongoMessageRepository extends IMessageRepository {
     if (!mongoose.Types.ObjectId.isValid(id)) return null;
     return MessageModel.findById(id).lean();
   }
+
+  /** Tombstone for unsend: set deletedAt, clear body + attachments. Keeps the doc (ordering). */
+  async softDelete(conversationId, messageId) {
+    return MessageModel.findOneAndUpdate(
+      { _id: messageId, conversationId },
+      { $set: { deletedAt: new Date(), body: '', attachments: [] } },
+      { new: true },
+    ).lean();
+  }
 }
 
 export default MongoMessageRepository;

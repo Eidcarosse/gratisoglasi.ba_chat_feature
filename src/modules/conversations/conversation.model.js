@@ -9,9 +9,12 @@
  *                      Deterministic order so the unique index dedups one convo per (item, pair).
  *   item            -> snapshot { title, thumbnailUrl, price (nullable), status, sellerId }
  *   participants    -> snapshot map { <userId>: { displayName, avatarUrl } }
- *   lastMessage     -> inbox preview { body, senderId, type, createdAt }
+ *   lastMessage     -> inbox preview { messageId, body, senderId, type, createdAt, deletedAt }
  *   unreadCounts    -> { <userId>: int } for O(1) badges
  *   readState       -> { <userId>: { lastReadMessageId, lastReadAt } }
+ *   deletedFor      -> [userId] who "deleted for me" (hidden from their inbox; cleared on new msg)
+ *   mutedBy         -> [userId] who muted push for this convo (unread still increments)
+ *   expiresAt       -> createdAt + CHAT_TTL_DAYS; TTL index auto-deletes the convo (+messages)
  *
  * NO messages array (unbounded-array anti-pattern) — messages are their own collection.
  *
@@ -29,10 +32,14 @@ import { MESSAGE_TYPES } from '../../config/constants.js';
 
 const lastMessageSchema = new mongoose.Schema(
   {
+    // messageId lets a delete/unsend detect whether the removed message IS the inbox preview,
+    // so the preview can be recomputed (the messages collection has no back-pointer here).
+    messageId: { type: mongoose.Schema.Types.ObjectId },
     body: String,
     senderId: { type: mongoose.Schema.Types.ObjectId },
     type: { type: String, enum: MESSAGE_TYPES },
     createdAt: Date,
+    deletedAt: { type: Date, default: null }, // set when the previewed message was unsent
   },
   { _id: false },
 );
@@ -64,12 +71,21 @@ const conversationSchema = new mongoose.Schema(
     lastMessage: { type: lastMessageSchema, default: null },
     unreadCounts: { type: mongoose.Schema.Types.Mixed, default: {} },
     readState: { type: mongoose.Schema.Types.Mixed, default: {} },
+    // Per-participant "delete for me": userIds here have hidden the convo from their inbox. A new
+    // message clears this (resurfaces the thread). Stored as ObjectIds (matches participantIds).
+    deletedFor: { type: [mongoose.Schema.Types.ObjectId], default: [] },
+    // Per-participant mute: userIds here receive no PUSH for new messages (unread still counts).
+    mutedBy: { type: [mongoose.Schema.Types.ObjectId], default: [] },
+    // TTL: set once at creation = createdAt + CHAT_TTL_DAYS. Messages carry the same instant so
+    // the whole thread expires together. Mongo's TTL monitor sweeps ~every 60s.
+    expiresAt: { type: Date },
   },
   { timestamps: true, minimize: false },
 );
 
 conversationSchema.index({ participantIds: 1, updatedAt: -1 });
 conversationSchema.index({ itemId: 1, pairKey: 1 }, { unique: true });
+conversationSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
 
 export const ConversationModel = mongoose.model('Conversation', conversationSchema);
 export default ConversationModel;

@@ -30,6 +30,16 @@ export function createMessageController({ messageService }) {
       });
       res.status(201).json({ message });
     }),
+
+    // DELETE /conversations/:conversationId/messages/:messageId  (unsend for everyone)
+    remove: asyncHandler(async (req, res) => {
+      await messageService.deleteMessage({
+        conversationId: req.params.conversationId,
+        messageId: req.params.messageId,
+        userId: req.userId,
+      });
+      res.json({ ok: true, messageId: req.params.messageId });
+    }),
   };
 }
 

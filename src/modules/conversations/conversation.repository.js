@@ -14,7 +14,7 @@ export class ConversationRepository {
    * Atomic find-or-create keyed by the unique { itemId, pairKey } index. The snapshot fields are
    * only written on insert ($setOnInsert) so an existing conversation keeps its original snapshot.
    */
-  async findOrCreate({ itemId, pairKey, participantIds, item, participants }) {
+  async findOrCreate({ itemId, pairKey, participantIds, item, participants, expiresAt }) {
     return ConversationModel.findOneAndUpdate(
       { itemId, pairKey },
       {
@@ -26,6 +26,7 @@ export class ConversationRepository {
           participants,
           unreadCounts: {},
           readState: {},
+          expiresAt, // fixed TTL window, set only at creation
         },
       },
       { upsert: true, new: true, setDefaultsOnInsert: true },
@@ -37,24 +38,56 @@ export class ConversationRepository {
   }
 
   async listByParticipant(userId, { limit = 50 } = {}) {
-    return ConversationModel.find({ participantIds: userId })
+    // Exclude conversations this user "deleted for me" (hidden from their inbox).
+    return ConversationModel.find({ participantIds: userId, deletedFor: { $ne: userId } })
       .sort({ updatedAt: -1 })
       .limit(limit)
       .lean();
   }
 
   /**
-   * On a new message: set lastMessage, bump updatedAt (timestamps), and $inc unread for every
-   * recipient (everyone except the sender). Never touches item/participants.
+   * On a new message: set lastMessage, bump updatedAt (timestamps), $inc unread for every
+   * recipient (everyone except the sender), and resurface the thread for anyone who had hidden it
+   * (`$pull` from deletedFor). `resurfaceFor` MUST be ObjectIds (deletedFor stores ObjectIds);
+   * `recipientIds` are strings (unread map keys). Never touches item/participants.
    */
-  async applyNewMessage({ conversationId, lastMessage, recipientIds }) {
+  async applyNewMessage({ conversationId, lastMessage, recipientIds, resurfaceFor = [] }) {
     const inc = {};
     for (const rid of recipientIds) inc[`unreadCounts.${rid}`] = 1;
+    const update = { $set: { lastMessage } };
+    if (Object.keys(inc).length) update.$inc = inc;
+    if (resurfaceFor.length) update.$pull = { deletedFor: { $in: resurfaceFor } };
+    return ConversationModel.findByIdAndUpdate(conversationId, update, {
+      new: true,
+      timestamps: true,
+    }).lean();
+  }
+
+  /**
+   * Replace ONLY the inbox preview (used when an unsent message was the last one). Targeted $set
+   * with timestamps:false so a deletion never reorders the inbox to the top.
+   */
+  async setLastMessage(conversationId, lastMessage) {
     return ConversationModel.findByIdAndUpdate(
       conversationId,
-      { $set: { lastMessage }, ...(Object.keys(inc).length ? { $inc: inc } : {}) },
-      { new: true, timestamps: true },
+      { $set: { lastMessage } },
+      { new: true, timestamps: false },
     ).lean();
+  }
+
+  /** "Delete for me": hide the convo from this user's inbox and clear their unread badge. */
+  async hideForUser(conversationId, userId) {
+    return ConversationModel.findByIdAndUpdate(
+      conversationId,
+      { $addToSet: { deletedFor: userId }, $set: { [`unreadCounts.${String(userId)}`]: 0 } },
+      { new: true },
+    ).lean();
+  }
+
+  /** Mute/unmute push for this user on this conversation (does not affect unread counts). */
+  async setMute(conversationId, userId, muted) {
+    const update = muted ? { $addToSet: { mutedBy: userId } } : { $pull: { mutedBy: userId } };
+    return ConversationModel.findByIdAndUpdate(conversationId, update, { new: true }).lean();
   }
 
   /**

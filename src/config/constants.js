@@ -29,6 +29,11 @@ export const LIMITS = Object.freeze({
   MAX_MESSAGE_LENGTH: 4000,
   DEFAULT_PAGE_SIZE: 50,
   MAX_PAGE_SIZE: 100,
+  // At most 5 attachments (images/files) per message. Enforced in the send schemas (REST + ws).
+  MAX_ATTACHMENTS: 5,
+  // Conversations and their messages auto-delete this many days AFTER the conversation's
+  // creation (fixed window, not rolling) via a MongoDB TTL index on `expiresAt`.
+  CHAT_TTL_DAYS: 7,
 });
 
 // Rate-limit windows/caps (in-memory now → Redis later). New-conversation creation is throttled

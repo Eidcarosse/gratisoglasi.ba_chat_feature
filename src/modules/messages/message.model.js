@@ -4,7 +4,7 @@
  *   { _id (ObjectId, time-sortable — doubles as ordering/seq key), conversationId (= future
  *     Scylla PARTITION KEY), senderId, clientMessageId (client UUID for idempotent dedup),
  *     type: 'text'|'image'|'file', body, attachments: [{key,url,mime,size,width,height}],
- *     status: 'sent', createdAt }
+ *     status: 'sent', deletedAt (unsend tombstone), createdAt, expiresAt (TTL) }
  * delivered/read are tracked on conversation.readState, NOT per message doc.
  * Indexes:
  *   { conversationId: 1, _id: -1 }                    → history (keyset pagination)
@@ -34,14 +34,21 @@ const messageSchema = new mongoose.Schema(
     body: { type: String, default: '' },
     attachments: { type: [attachmentSchema], default: [] },
     status: { type: String, default: MESSAGE_STATUS.SENT },
+    // Unsend tombstone: set when a message is "deleted for everyone". The doc stays (preserves
+    // ordering/history); body+attachments are cleared so the client renders "message deleted".
+    deletedAt: { type: Date, default: null },
     // createdAt is set explicitly (not via timestamps) so it aligns with the _id ordering key.
     createdAt: { type: Date, default: Date.now },
+    // TTL: aligned to the conversation's createdAt + CHAT_TTL_DAYS so the whole thread expires
+    // together (Mongo TTL can't cascade across collections).
+    expiresAt: { type: Date },
   },
   { versionKey: false },
 );
 
 messageSchema.index({ conversationId: 1, _id: -1 });
 messageSchema.index({ conversationId: 1, clientMessageId: 1 }, { unique: true });
+messageSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
 
 export const MessageModel = mongoose.model('Message', messageSchema);
 export default MessageModel;

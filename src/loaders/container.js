@@ -38,6 +38,8 @@ import { MemoryPresenceStore } from '../modules/presence/presence.store.memory.j
 import { PresenceService } from '../modules/presence/presence.service.js';
 
 import { NotificationService } from '../modules/notifications/notification.service.js';
+import { DeviceRepository } from '../modules/notifications/device.repository.js';
+import { ExpoPushProvider } from '../modules/notifications/push.provider.js';
 import { DeviceModel } from '../modules/notifications/device.model.js';
 
 import { UploadService } from '../modules/uploads/upload.service.js';
@@ -78,8 +80,10 @@ export function buildContainer({ gratisConn }) {
   const presenceStore = new MemoryPresenceStore();
   const presenceService = new PresenceService({ presenceStore });
 
-  // --- Notifications + realtime emitter ---
-  const notificationService = new NotificationService();
+  // --- Notifications (Expo push) + realtime emitter ---
+  const deviceRepository = new DeviceRepository();
+  const pushProvider = new ExpoPushProvider({ accessToken: config.EXPO_ACCESS_TOKEN });
+  const notificationService = new NotificationService({ deviceRepository, pushProvider });
   const gateway = new Gateway();
 
   // --- Messages (single write path) ---
@@ -111,6 +115,8 @@ export function buildContainer({ gratisConn }) {
     messageService,
     presenceService,
     notificationService,
+    deviceRepository,
+    pushProvider,
     uploadService,
     gateway,
     // models (for index sync)

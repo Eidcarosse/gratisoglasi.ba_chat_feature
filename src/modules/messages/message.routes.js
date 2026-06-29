@@ -11,10 +11,8 @@ import {
   z,
   objectIdString,
   pagination,
-  messageType,
-  messageBody,
-  clientMessageId,
-  attachment,
+  sendMessageShape,
+  refineSend,
 } from '../../common/validation/index.js';
 import { rateLimit } from '../../common/middleware/rateLimit.js';
 import { RATE_LIMITS } from '../../config/constants.js';
@@ -40,19 +38,16 @@ export function createMessageRoutes(container) {
     rateLimit({ ...RATE_LIMITS.MESSAGE_SEND, keyPrefix: 'msg' }),
     validate({
       params: paramsSchema,
-      body: z
-        .object({
-          clientMessageId,
-          type: messageType,
-          body: messageBody.optional(),
-          attachments: z.array(attachment).optional(),
-        })
-        .refine((d) => d.type !== 'text' || (d.body && d.body.length > 0), {
-          message: 'Text messages require a body',
-          path: ['body'],
-        }),
+      body: refineSend(z.object({ ...sendMessageShape })),
     }),
     controller.send,
+  );
+
+  router.delete(
+    '/:messageId',
+    requireAuth,
+    validate({ params: z.object({ conversationId: objectIdString, messageId: objectIdString }) }),
+    controller.remove,
   );
 
   return router;

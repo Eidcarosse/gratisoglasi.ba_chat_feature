@@ -14,6 +14,7 @@ export const EVENTS = Object.freeze({
 
   // Server → Client
   MESSAGE_NEW: 'message:new',
+  MESSAGE_DELETED: 'message:deleted',
   RECEIPT_UPDATE: 'receipt:update',
   TYPING: 'typing',
   PRESENCE_UPDATE: 'presence:update',

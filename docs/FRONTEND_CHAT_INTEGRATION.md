@@ -187,8 +187,9 @@ interface Message {
   clientMessageId: string;     // the UUID v4 YOU generated (idempotency / reconcile key)
   type: MessageType;
   body: string;                // text content ('' for non-text). HTML-escaped server-side.
-  attachments: Attachment[];   // [] when none
+  attachments: Attachment[];   // [] when none ([] after an unsend)
   status: MessageStatus;       // 'sent'
+  deletedAt: string | null;    // ISO-8601 when unsent ("deleted for everyone"); body+attachments cleared
   createdAt: string;           // ISO-8601
 }
 
@@ -218,15 +219,20 @@ interface Conversation {
   item: ItemSnapshot;                     // snapshot; refreshed only on GET-one (see below)
   participants: Record<string, ParticipantSummary>;   // keyed by userId
   lastMessage: {
-    body: string;                         // "[image]"/"[file]" for non-text
+    messageId: string;                    // id of the previewed message
+    body: string;                         // "[image]"/"[file]" for non-text; "" if unsent
     senderId: string;
     type: MessageType;
     createdAt: string;
+    deletedAt: string | null;             // set if the previewed message was unsent
   } | null;                               // null until first message
   unreadCounts: Record<string, number>;   // keyed by userId
   readState: Record<string, ReadStateEntry>; // keyed by userId
+  mutedBy: string[];                       // userIds who muted push for this convo
   createdAt: string;
   updatedAt: string;                       // inbox is sorted by this, desc
+  // expiresAt (createdAt + 7d, TTL) and deletedFor[] also exist server-side; the inbox already
+  // omits conversations YOU deleted, so deletedFor is not something the client needs to read.
 
   // Present ONLY on GET /conversations/:id (live overlay; not stored):
   itemLive?: { price: number | null; status: string; hidden: boolean };
@@ -280,15 +286,18 @@ descending.
         "64b2f0c2a1d4e5f600000bbb": { "displayName": "Mirza K.", "avatarUrl": "https://cdn.example.com/u/bbb.jpg" }
       },
       "lastMessage": {
+        "messageId": "64b2f0c2a1d4e5f600000f10",
         "body": "Is it still available?",
         "senderId": "64b2f0c2a1d4e5f600000aaa",
         "type": "text",
-        "createdAt": "2026-06-24T10:05:00.000Z"
+        "createdAt": "2026-06-24T10:05:00.000Z",
+        "deletedAt": null
       },
       "unreadCounts": { "64b2f0c2a1d4e5f600000aaa": 0, "64b2f0c2a1d4e5f600000bbb": 1 },
       "readState": {
         "64b2f0c2a1d4e5f600000aaa": { "lastReadMessageId": "64b2f0c2a1d4e5f600000f01", "lastReadAt": "2026-06-24T10:05:01.000Z" }
       },
+      "mutedBy": [],
       "createdAt": "2026-06-24T09:00:00.000Z",
       "updatedAt": "2026-06-24T10:05:00.000Z"
     }
@@ -381,6 +390,7 @@ Fetch a page of messages, **newest-first**, with keyset pagination.
       "body": "Yes, still available.",
       "attachments": [],
       "status": "sent",
+      "deletedAt": null,
       "createdAt": "2026-06-24T10:06:00.000Z"
     }
   ]
@@ -469,7 +479,93 @@ storage (DigitalOcean Spaces / S3); the chat server never handles the file.
 4. Send `message:send` (or REST send) with `type: "image" | "file"` and
    `attachments: [{ key, url, mime, size, width?, height? }]`.
 
-### 5.7 Health endpoints (informational, no auth)
+### 5.7 `DELETE /conversations/:conversationId` — delete conversation (for me)
+
+Hide a conversation from **your own** inbox. Per-participant: the other participant is unaffected
+and still sees the thread and its full history. Your unread badge for it is reset to 0. A **new
+message** in that conversation makes it reappear in your inbox automatically.
+
+- **Auth:** required. Must be a participant, else `403 FORBIDDEN`.
+- **Path param:** `conversationId` (24-hex).
+- **Body:** none.
+- **200 response:** `{ "ok": true }`.
+- **Error cases:** not a participant → `403 FORBIDDEN`; unknown/invalid id → `404 NOT_FOUND`.
+- **No socket event** is emitted — the effect is local to your inbox only.
+
+### 5.8 `PATCH /conversations/:conversationId/mute` — mute / unmute
+
+Toggle **push-notification** suppression for this conversation, for **you** only. Muting does
+**not** stop unread counts or message delivery — it only suppresses the offline push.
+
+- **Auth:** required. Must be a participant, else `403 FORBIDDEN`.
+- **Path param:** `conversationId` (24-hex).
+- **Request body:**
+
+```json
+{ "muted": true }
+```
+
+| Field | Type | Rules |
+| ----- | ---- | ----- |
+| `muted` | boolean | Required. `true` mutes, `false` unmutes. |
+
+- **200 response:** `{ "ok": true, "muted": true }`.
+- **Error cases:** not a participant → `403 FORBIDDEN`; unknown id → `404 NOT_FOUND`; missing/
+  non-boolean `muted` → `400 VALIDATION`.
+
+> The current mute state is also reflected on the conversation as `mutedBy: string[]` (the userIds
+> who muted it) — see §4.
+
+### 5.9 `DELETE /conversations/:conversationId/messages/:messageId` — unsend (delete for everyone)
+
+Delete a message for **both** participants. **Sender-only** — only the message's author may
+unsend it. The message is **tombstoned** (kept in history with `body:""`, `attachments:[]`,
+`deletedAt` set) so ordering is preserved; render it as "message deleted".
+
+- **Auth:** required. Must be a participant; must be the **sender** of the message.
+- **Path params:** `conversationId`, `messageId` (both 24-hex).
+- **Body:** none.
+- **200 response:** `{ "ok": true, "messageId": "…" }`.
+- **Side effect:** the server broadcasts **`message:deleted` `{ conversationId, messageId }`** to
+  the conversation (§6.2), and recomputes `conversation.lastMessage` if the unsent message was the
+  inbox preview.
+- **Error cases:** not the sender → `403 FORBIDDEN`; unknown message / wrong conversation →
+  `404 NOT_FOUND`. Idempotent: unsending an already-deleted message still returns `200`.
+
+### 5.10 `POST /devices` — register a push token
+
+Register (or refresh) this device's **Expo** push token so the user receives new-message
+notifications while offline. Call on login / app start. Upserts by `token`: re-registering an
+existing token reassigns it to the current user (correct for shared devices).
+
+- **Auth:** required.
+- **Request body:**
+
+```json
+{ "token": "ExponentPushToken[xxxxxxxxxxxxxxxxxxxxxx]", "platform": "android" }
+```
+
+| Field | Type | Rules |
+| ----- | ---- | ----- |
+| `token` | string | Required, non-empty. The device's `ExponentPushToken[...]`. |
+| `platform` | `"ios"` \| `"android"` \| `"web"` | Required. |
+
+- **201 response:** `{ "ok": true }`.
+- **Error cases:** missing token / bad platform → `400 VALIDATION`.
+
+### 5.11 `DELETE /devices` — unregister a push token
+
+Drop this device's push token on logout. Scoped to the authenticated user (you cannot remove
+another user's token).
+
+- **Auth:** required.
+- **Request body:** `{ "token": "ExponentPushToken[...]" }`.
+- **200 response:** `{ "ok": true }`.
+- **Error cases:** missing token → `400 VALIDATION`.
+
+> See §10.5 for the full push behavior (when a push fires, payload shape, dead-token pruning).
+
+### 5.12 Health endpoints (informational, no auth)
 
 | Method | Path | Meaning |
 | ------ | ---- | ------- |
@@ -579,11 +675,22 @@ Register listeners for these as soon as you connect.
 #### `message:new` — a new message arrived
 
 ```json
-{ "message": { "_id": "…", "conversationId": "…", "senderId": "…", "clientMessageId": "…", "type": "text", "body": "Hi", "attachments": [], "status": "sent", "createdAt": "2026-06-24T10:07:00.000Z" } }
+{ "message": { "_id": "…", "conversationId": "…", "senderId": "…", "clientMessageId": "…", "type": "text", "body": "Hi", "attachments": [], "status": "sent", "deletedAt": null, "createdAt": "2026-06-24T10:07:00.000Z" } }
 ```
 
 Fires for messages from the other participant **and** as an echo of your own sends (covers
 multi-device). Always dedupe/reconcile by `clientMessageId` (or `_id`).
+
+#### `message:deleted` — a message was unsent (deleted for everyone)
+
+```json
+{ "conversationId": "…", "messageId": "…" }
+```
+
+Emitted to the conversation when a sender unsends a message (REST `DELETE …/messages/:messageId`,
+§5.9). Find the message by `messageId` and render it as deleted (its `body` is now `""`,
+`attachments` is `[]`, and `deletedAt` is set). The message keeps its position in history. If it
+was the inbox preview, the server has already recomputed `conversation.lastMessage`.
 
 #### `receipt:update` — delivery or read receipt
 
@@ -761,9 +868,14 @@ Brief guidance, not prescriptive code (this doc is a contract spec). A clean lay
 | GET | `/conversations` | ✅ | — | `200 { conversations }` |
 | POST | `/conversations` | ✅ (10/60s) | `{ itemId }` | `201 { conversation }` |
 | GET | `/conversations/:id` | ✅ | — | `200 { conversation + itemLive }` |
+| DELETE | `/conversations/:id` | ✅ | — | `200 { ok }` — "delete for me" (hides from MY inbox; a new message resurfaces it) |
+| PATCH | `/conversations/:id/mute` | ✅ | `{ muted: boolean }` | `200 { ok, muted }` — mutes/unmutes push for me |
 | GET | `/conversations/:id/messages` | ✅ | `?before&limit(1-100,def 50)` | `200 { messages }` newest-first |
 | POST | `/conversations/:id/messages` | ✅ (30/10s) | `{ clientMessageId, type, body?, attachments? }` | `201 { message }` |
+| DELETE | `/conversations/:id/messages/:messageId` | ✅ | — | `200 { ok, messageId }` — unsend for everyone (sender-only) |
 | POST | `/uploads/presign` | ✅ | `{ mime, size, filename? }` | `200 { url, key, expiresIn }` |
+| POST | `/devices` | ✅ | `{ token, platform }` | `201 { ok }` — register Expo push token |
+| DELETE | `/devices` | ✅ | `{ token }` | `200 { ok }` — unregister on logout |
 | GET | `/healthz` `/readyz` `/metrics` | — | — | health/metrics |
 
 ### 10.2 Socket events
@@ -777,6 +889,7 @@ Brief guidance, not prescriptive code (this doc is a contract spec). A clean lay
 | C→S | `conversation:sync` | `{ cursors: { [convId]: msgId } }` | `{ ok, missed[] }` |
 | C→S | `presence:heartbeat` | — | none |
 | S→C | `message:new` | `{ message }` | — |
+| S→C | `message:deleted` | `{ conversationId, messageId }` | — (an unsend — render the message as deleted) |
 | S→C | `receipt:update` | `{ conversationId, userId, deliveredMessageId? , lastReadMessageId? }` | — |
 | S→C | `typing` | `{ conversationId, userId, isTyping }` | — |
 | S→C | `presence:update` | `{ userId, status, lastSeenAt? }` | — |
@@ -787,7 +900,9 @@ Brief guidance, not prescriptive code (this doc is a contract spec). A clean lay
 - `body`: trimmed, **1–4000** chars; required & non-empty for `type === 'text'`.
 - `type`: `text | image | file`. `limit`: int 1–100 (default 50).
 - `attachment`: `{ key:str, url:URL, mime:str, size:int≥0, width?:int>0, height?:int>0 }`.
+- `attachments`: **at most 5** per message; `image`/`file` messages require **≥1** attachment.
 - Upload: mime ∈ {jpeg,png,webp,gif,pdf}; size ≤ 10 MB; presign URL TTL 300 s.
+- `platform` (devices): `ios | android | web`. `token`: an `ExponentPushToken[...]`.
 
 ### 10.4 Server config knobs that affect the client
 
@@ -796,8 +911,32 @@ Brief guidance, not prescriptive code (this doc is a contract spec). A clean lay
 | `PORT` | `3000` | Base URL / socket origin. |
 | `CORS_ORIGINS` | `*` | Must include your web origin (RN native is unaffected; Expo web isn't). `credentials: true`. |
 | `AUTH_MODE` | `dev` | `dev` → token = userId; `jwt` → token = signed JWT (same wiring). |
+| `EXPO_ACCESS_TOKEN` | — | Server-side only; push works without it. No client impact. |
 
-### 10.5 Source-of-truth files (server)
+### 10.5 Push notifications, delete & mute (behavior)
+
+**Push (Expo).** Register the device's Expo push token after login/app-start with
+`POST /devices { token: "ExponentPushToken[...]", platform: "ios"|"android"|"web" }`, and
+`DELETE /devices { token }` on logout. The server pushes a new-message notification to a
+recipient **only when they have no active socket** (are offline) **and** have not muted the
+conversation. Payload: `title` = sender's display name, `body` = the text (truncated) or
+`📷 Photo` / `📎 File`, `data = { type, conversationId, messageId?, itemTitle? }` — use `data`
+to deep-link into the conversation (and, via `conversation.itemId`, the ad). Tokens Expo reports
+as `DeviceNotRegistered` are pruned server-side; re-register on each app start.
+
+**Unsend (delete message for everyone).** `DELETE /conversations/:id/messages/:messageId`
+(sender-only; 403 otherwise). The message is tombstoned — it stays in history with
+`deletedAt` set and `body:""`/`attachments:[]` — and a `message:deleted { conversationId,
+messageId }` event is broadcast to the room. Render tombstoned messages as "message deleted".
+
+**Delete conversation (for me).** `DELETE /conversations/:id` hides the conversation from the
+caller's inbox only (the other participant is unaffected) and resets the caller's unread badge.
+A new message in that conversation makes it reappear. No socket event is emitted.
+
+**Mute.** `PATCH /conversations/:id/mute { muted }` toggles push suppression for the caller.
+Muting does **not** stop unread counts — only push. The `muted` state is per-participant.
+
+### 10.6 Source-of-truth files (server)
 
 | Contract | File |
 | -------- | ---- |
@@ -810,5 +949,6 @@ Brief guidance, not prescriptive code (this doc is a contract spec). A clean lay
 | Socket handlers | `src/realtime/handlers/{message,typing,presence}.handler.js` |
 | Connection lifecycle / rooms | `src/realtime/gateway.js`, `src/realtime/rooms.js` |
 | Upload presign | `src/modules/uploads/upload.{routes,controller,service}.js` |
+| Devices / push (Expo) | `src/modules/notifications/{device.routes,device.controller,device.repository,notification.service,push.provider}.js` |
 | App wiring (mounts, error handler) | `src/loaders/express.js`, `src/loaders/socket.js` |
 ```

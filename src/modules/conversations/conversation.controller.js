@@ -25,6 +25,18 @@ export function createConversationController({ conversationService }) {
       const convo = await conversationService.open(req.params.conversationId, req.userId);
       res.json({ conversation: convo });
     }),
+
+    // DELETE /conversations/:conversationId — "delete for me" (hide from caller's inbox).
+    remove: asyncHandler(async (req, res) => {
+      await conversationService.hideForUser(req.params.conversationId, req.userId);
+      res.json({ ok: true });
+    }),
+
+    // PATCH /conversations/:conversationId/mute { muted } — mute/unmute push for the caller.
+    mute: asyncHandler(async (req, res) => {
+      await conversationService.setMute(req.params.conversationId, req.userId, req.body.muted);
+      res.json({ ok: true, muted: req.body.muted });
+    }),
   };
 }
 

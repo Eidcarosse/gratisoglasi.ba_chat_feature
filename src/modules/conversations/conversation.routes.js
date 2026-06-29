@@ -31,6 +31,23 @@ export function createConversationRoutes(container) {
     controller.getOne,
   );
 
+  router.delete(
+    '/:conversationId',
+    requireAuth,
+    validate({ params: z.object({ conversationId: objectIdString }) }),
+    controller.remove,
+  );
+
+  router.patch(
+    '/:conversationId/mute',
+    requireAuth,
+    validate({
+      params: z.object({ conversationId: objectIdString }),
+      body: z.object({ muted: z.boolean() }),
+    }),
+    controller.mute,
+  );
+
   return router;
 }
 

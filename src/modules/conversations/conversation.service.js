@@ -9,9 +9,11 @@
  */
 import mongoose from 'mongoose';
 import { AppError } from '../../common/errors/AppError.js';
+import { LIMITS } from '../../config/constants.js';
 
 const oid = (v) => new mongoose.Types.ObjectId(v);
 const isMember = (convo, userId) => convo.participantIds.some((p) => String(p) === String(userId));
+const CHAT_TTL_MS = LIMITS.CHAT_TTL_DAYS * 24 * 60 * 60 * 1000;
 
 export class ConversationService {
   /**
@@ -55,6 +57,8 @@ export class ConversationService {
         sellerId: oid(sellerId),
       },
       participants,
+      // Fixed 7-day-since-creation TTL window (only stamped on insert; never extended).
+      expiresAt: new Date(Date.now() + CHAT_TTL_MS),
     });
   }
 
@@ -95,13 +99,34 @@ export class ConversationService {
     return this.repo.applyNewMessage({
       conversationId: convo._id,
       lastMessage: {
+        messageId: message._id,
         body: message.type === 'text' ? message.body : `[${message.type}]`,
         senderId: message.senderId,
         type: message.type,
         createdAt: message.createdAt,
+        deletedAt: null,
       },
       recipientIds,
+      // Any new message resurfaces the (2-party) thread for whoever hid it. ObjectIds, not strings.
+      resurfaceFor: convo.participantIds,
     });
+  }
+
+  /** Replace ONLY the inbox preview (used after an unsend recompute). Caller already authorized. */
+  async replaceLastMessage(conversationId, lastMessage) {
+    return this.repo.setLastMessage(oid(conversationId), lastMessage);
+  }
+
+  /** "Delete for me": hide the conversation from the caller's inbox (membership-guarded). */
+  async hideForUser(conversationId, userId) {
+    await this.#getMemberConvo(conversationId, userId);
+    return this.repo.hideForUser(oid(conversationId), oid(userId));
+  }
+
+  /** Mute/unmute push for the caller on this conversation (membership-guarded). */
+  async setMute(conversationId, userId, muted) {
+    await this.#getMemberConvo(conversationId, userId);
+    return this.repo.setMute(oid(conversationId), oid(userId), muted);
   }
 
   /** Mark messages read up to a point: reset the caller's unread counter, record readState. */

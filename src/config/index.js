@@ -46,6 +46,10 @@ const envSchema = z
     SPACES_BUCKET: z.string().optional(),
     SPACES_KEY: z.string().optional(),
     SPACES_SECRET: z.string().optional(),
+
+    // Expo Push (notifications). Optional — Expo accepts unauthenticated sends; an access token
+    // only raises rate limits / enables FCM-v1 receipts. Push works without it.
+    EXPO_ACCESS_TOKEN: z.string().optional(),
   })
   .superRefine((env, ctx) => {
     // JWT mode is useless without a secret — fail fast rather than verifying against undefined.

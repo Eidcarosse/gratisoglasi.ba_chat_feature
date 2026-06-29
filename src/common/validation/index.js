@@ -50,4 +50,39 @@ export const attachment = z.object({
   height: z.number().int().positive().optional(),
 });
 
+/** Attachment list capped at LIMITS.MAX_ATTACHMENTS (5) — the "max 5 images" rule. */
+export const attachments = z
+  .array(attachment)
+  .max(LIMITS.MAX_ATTACHMENTS, `At most ${LIMITS.MAX_ATTACHMENTS} attachments per message`);
+
+/**
+ * Shared field shape for a "send message" payload — REST body and the socket message:send event
+ * use the same fields. Exported as a PLAIN object (not a pre-built schema) so the socket schema
+ * can `z.object({ conversationId, ...sendMessageShape })` before refining; a `.refine()`d schema
+ * is a ZodEffects that can't be extended/merged.
+ */
+export const sendMessageShape = {
+  clientMessageId,
+  type: messageType,
+  body: messageBody.optional(),
+  attachments: attachments.optional(),
+};
+
+/**
+ * Applies the cross-field content rules both transports share:
+ *   - text messages require a non-empty body
+ *   - image/file messages require at least one attachment
+ */
+export function refineSend(schema) {
+  return schema
+    .refine((d) => d.type !== 'text' || (d.body && d.body.length > 0), {
+      message: 'Text messages require a body',
+      path: ['body'],
+    })
+    .refine((d) => d.type === 'text' || (d.attachments && d.attachments.length > 0), {
+      message: 'image and file messages require at least one attachment',
+      path: ['attachments'],
+    });
+}
+
 export { z };
