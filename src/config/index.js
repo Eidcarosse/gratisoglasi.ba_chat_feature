@@ -40,12 +40,11 @@ const envSchema = z
           .filter(Boolean),
       ),
 
-    // DigitalOcean Spaces / S3 (uploads). Optional at MVP — presign route 503s if unset.
-    SPACES_ENDPOINT: z.string().optional(),
-    SPACES_REGION: z.string().default('us-east-1'),
-    SPACES_BUCKET: z.string().optional(),
-    SPACES_KEY: z.string().optional(),
-    SPACES_SECRET: z.string().optional(),
+    // Cloudflare Images (uploads). Optional — the /uploads/images route 503s if unset. The
+    // runtime "enabled" gate is Boolean(CLOUDFLARE_ACCOUNT_ID && CLOUDFLARE_IMAGES_TOKEN).
+    CLOUDFLARE_ACCOUNT_ID: z.string().optional(),
+    CLOUDFLARE_IMAGES_TOKEN: z.string().optional(),
+    CLOUDFLARE_IMAGES_VARIANT: z.string().default('public'),
 
     // Expo Push (notifications). Optional — Expo accepts unauthenticated sends; an access token
     // only raises rate limits / enables FCM-v1 receipts. Push works without it.

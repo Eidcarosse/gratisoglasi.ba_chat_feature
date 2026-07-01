@@ -34,10 +34,10 @@
 The chat backend is a standalone Node service. It exposes **two coordinated transports
 over the same origin**:
 
-| Transport | Use it for | Notes |
-| --------- | ---------- | ----- |
-| **REST (HTTP/JSON)** | Inbox list, find-or-create conversation, open conversation, message **history** (pagination), file presign. Also a REST **fallback** for sending. | Stateless. One request → one response. |
-| **Socket.IO (WebSocket)** | Live send/receive, typing, read/delivery receipts, presence, reconnect sync. | Single persistent connection. `transports: ['websocket']` only — **no HTTP long-polling fallback**. |
+| Transport                 | Use it for                                                                                                                                        | Notes                                                                                               |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| **REST (HTTP/JSON)**      | Inbox list, find-or-create conversation, open conversation, message **history** (pagination), image upload. Also a REST **fallback** for sending. | Stateless. One request → one response.                                                              |
+| **Socket.IO (WebSocket)** | Live send/receive, typing, read/delivery receipts, presence, reconnect sync.                                                                      | Single persistent connection. `transports: ['websocket']` only — **no HTTP long-polling fallback**. |
 
 Both transports are backed by the **same service layer**: sending a message via REST or via
 the socket runs identical validation, idempotency, and side effects. The socket is the
@@ -84,16 +84,21 @@ dev→prod is a config change, not a code change.
 import { io } from 'socket.io-client';
 
 const socket = io(BASE_URL, {
-  transports: ['websocket'],   // REQUIRED — server accepts websocket only
-  auth: { token },             // dev: token === userId ; prod: signed JWT
+  transports: ['websocket'], // REQUIRED — server accepts websocket only
+  auth: { token }, // dev: token === userId ; prod: signed JWT
   autoConnect: true,
 });
 
-socket.on('connect', () => { /* connected; server has joined your rooms */ });
-socket.on('connect_error', (err) => { /* bad/missing token rejects the handshake */ });
+socket.on('connect', () => {
+  /* connected; server has joined your rooms */
+});
+socket.on('connect_error', (err) => {
+  /* bad/missing token rejects the handshake */
+});
 ```
 
 On a successful handshake the server automatically:
+
 - joins your personal room and the rooms of all your existing conversations, and
 - broadcasts your **online** presence to the other participants in those conversations.
 
@@ -124,10 +129,10 @@ Generate it client-side, e.g. with `react-native-uuid` or `expo-crypto`'s `rando
 
 ### 3.2 History vs. sync — two different orderings
 
-| Operation | Transport | Cursor | Order returned |
-| --------- | --------- | ------ | -------------- |
-| **History** (scroll back) | `GET …/messages?before=<id>` | `before` = oldest message `_id` you currently hold | **newest-first** (descending `_id`) |
-| **Sync** (after reconnect) | socket `conversation:sync` | per-conversation = newest `_id` you hold | **oldest-first** (ascending `_id`), only messages newer than the cursor |
+| Operation                  | Transport                    | Cursor                                             | Order returned                                                          |
+| -------------------------- | ---------------------------- | -------------------------------------------------- | ----------------------------------------------------------------------- |
+| **History** (scroll back)  | `GET …/messages?before=<id>` | `before` = oldest message `_id` you currently hold | **newest-first** (descending `_id`)                                     |
+| **Sync** (after reconnect) | socket `conversation:sync`   | per-conversation = newest `_id` you hold           | **oldest-first** (ascending `_id`), only messages newer than the cursor |
 
 Both use **keyset pagination on `_id`** (ObjectIds are time-sortable). Never use offset/skip.
 Mind the orderings differ — history descends, sync ascends.
@@ -136,6 +141,7 @@ Mind the orderings differ — history descends, sync ascends.
 
 A `Message.status` is always the single value `'sent'`. **Delivered/read state does NOT live on
 the message.** It lives on the **conversation**:
+
 - `conversation.unreadCounts[userId]` — per-user unread count.
 - `conversation.readState[userId]` — `{ lastReadMessageId, lastReadAt }` watermark per user.
 - Delivery receipts (`message:delivered`) are **relayed live but not persisted** — treat them
@@ -151,10 +157,10 @@ To render "✓ read" you compare a message's `_id` against the other participant
 
 ### 3.5 Rate limits → handle `429` / `RATE_LIMITED`
 
-| Action | Limit |
-| ------ | ----- |
-| Send message | **30 per 10 s** per user |
-| Create conversation | **10 per 60 s** per user |
+| Action                    | Limit                     |
+| ------------------------- | ------------------------- |
+| Send message              | **30 per 10 s** per user  |
+| Create conversation       | **10 per 60 s** per user  |
 | Default (other endpoints) | **300 per 60 s** per user |
 
 Exceeding a limit returns HTTP `429` (REST) or an ack `error.code === 'RATE_LIMITED'` (socket).
@@ -169,35 +175,36 @@ TypeScript-style interfaces describing exactly what the API returns. All `*Id` f
 
 ```ts
 type MessageType = 'text' | 'image' | 'file';
-type MessageStatus = 'sent';                 // always 'sent' (see §3.3)
+type MessageStatus = 'sent'; // always 'sent' (see §3.3)
 
 interface Attachment {
-  key: string;        // object key returned by POST /uploads/presign
-  url: string;        // public URL of the uploaded object (valid URL)
-  mime: string;       // e.g. "image/png"
-  size: number;       // bytes, integer >= 0
-  width?: number;     // integer > 0 (images)
-  height?: number;    // integer > 0 (images)
+  key: string; // Cloudflare image id returned by POST /uploads/images (as `key`)
+  url: string; // public delivery URL of the uploaded image (valid URL)
+  mime: string; // e.g. "image/png"
+  size: number; // bytes, integer >= 0
+  width?: number; // integer > 0 (images)
+  height?: number; // integer > 0 (images)
 }
 
 interface Message {
-  _id: string;                 // server-assigned; ALSO the sort/pagination key
+  _id: string; // server-assigned; ALSO the sort/pagination key
   conversationId: string;
-  senderId: string;            // authoritative sender (from auth, not client input)
-  clientMessageId: string;     // the UUID v4 YOU generated (idempotency / reconcile key)
+  senderId: string; // authoritative sender (from auth, not client input)
+  clientMessageId: string; // the UUID v4 YOU generated (idempotency / reconcile key)
   type: MessageType;
-  body: string;                // text content ('' for non-text). HTML-escaped server-side.
-  attachments: Attachment[];   // [] when none ([] after an unsend)
-  status: MessageStatus;       // 'sent'
-  deletedAt: string | null;    // ISO-8601 when unsent ("deleted for everyone"); body+attachments cleared
-  createdAt: string;           // ISO-8601
+  body: string; // text content ('' for non-text). HTML-escaped server-side.
+  attachments: Attachment[]; // [] when none ([] after an unsend)
+  status: MessageStatus; // 'sent'
+  deletedAt: string | null; // ISO-8601 when unsent ("deleted for everyone"); body+attachments cleared
+  createdAt: string; // ISO-8601
 }
 
-interface ItemSnapshot {       // marketplace item, snapshotted at conversation creation
+interface ItemSnapshot {
+  // marketplace item, snapshotted at conversation creation
   title: string;
   thumbnailUrl: string | null;
   price: number | null;
-  status: string;              // moderation status: 'Pending' | 'Review' | 'Approved'
+  status: string; // moderation status: 'Pending' | 'Review' | 'Approved'
   sellerId: string;
 }
 
@@ -208,29 +215,29 @@ interface ParticipantSummary {
 
 interface ReadStateEntry {
   lastReadMessageId: string | null;
-  lastReadAt: string;          // ISO-8601
+  lastReadAt: string; // ISO-8601
 }
 
 interface Conversation {
   _id: string;
   itemId: string;
-  pairKey: string;                       // "<buyerId>:<sellerId>" — internal dedup key
-  participantIds: [string, string];      // deterministic order: [buyerId, sellerId]
-  item: ItemSnapshot;                     // snapshot; refreshed only on GET-one (see below)
-  participants: Record<string, ParticipantSummary>;   // keyed by userId
+  pairKey: string; // "<buyerId>:<sellerId>" — internal dedup key
+  participantIds: [string, string]; // deterministic order: [buyerId, sellerId]
+  item: ItemSnapshot; // snapshot; refreshed only on GET-one (see below)
+  participants: Record<string, ParticipantSummary>; // keyed by userId
   lastMessage: {
-    messageId: string;                    // id of the previewed message
-    body: string;                         // "[image]"/"[file]" for non-text; "" if unsent
+    messageId: string; // id of the previewed message
+    body: string; // "[image]"/"[file]" for non-text; "" if unsent
     senderId: string;
     type: MessageType;
     createdAt: string;
-    deletedAt: string | null;             // set if the previewed message was unsent
-  } | null;                               // null until first message
-  unreadCounts: Record<string, number>;   // keyed by userId
+    deletedAt: string | null; // set if the previewed message was unsent
+  } | null; // null until first message
+  unreadCounts: Record<string, number>; // keyed by userId
   readState: Record<string, ReadStateEntry>; // keyed by userId
-  mutedBy: string[];                       // userIds who muted push for this convo
+  mutedBy: string[]; // userIds who muted push for this convo
   createdAt: string;
-  updatedAt: string;                       // inbox is sorted by this, desc
+  updatedAt: string; // inbox is sorted by this, desc
   // expiresAt (createdAt + 7d, TTL) and deletedFor[] also exist server-side; the inbox already
   // omits conversations YOU deleted, so deletedFor is not something the client needs to read.
 
@@ -250,6 +257,7 @@ Opening a single conversation (`GET /conversations/:id`) refreshes `item.price`/
 ## 5. REST API reference
 
 Common to **all** routes:
+
 - Header `Authorization: Bearer <token>` is **required**. Missing/invalid → `401`
   `UNAUTHENTICATED`.
 - Request bodies are JSON; max body size **256 kB**.
@@ -282,8 +290,14 @@ descending.
         "sellerId": "64b2f0c2a1d4e5f600000bbb"
       },
       "participants": {
-        "64b2f0c2a1d4e5f600000aaa": { "displayName": "Adnan B.", "avatarUrl": "https://cdn.example.com/u/aaa.jpg" },
-        "64b2f0c2a1d4e5f600000bbb": { "displayName": "Mirza K.", "avatarUrl": "https://cdn.example.com/u/bbb.jpg" }
+        "64b2f0c2a1d4e5f600000aaa": {
+          "displayName": "Adnan B.",
+          "avatarUrl": "https://cdn.example.com/u/aaa.jpg"
+        },
+        "64b2f0c2a1d4e5f600000bbb": {
+          "displayName": "Mirza K.",
+          "avatarUrl": "https://cdn.example.com/u/bbb.jpg"
+        }
       },
       "lastMessage": {
         "messageId": "64b2f0c2a1d4e5f600000f10",
@@ -295,7 +309,10 @@ descending.
       },
       "unreadCounts": { "64b2f0c2a1d4e5f600000aaa": 0, "64b2f0c2a1d4e5f600000bbb": 1 },
       "readState": {
-        "64b2f0c2a1d4e5f600000aaa": { "lastReadMessageId": "64b2f0c2a1d4e5f600000f01", "lastReadAt": "2026-06-24T10:05:01.000Z" }
+        "64b2f0c2a1d4e5f600000aaa": {
+          "lastReadMessageId": "64b2f0c2a1d4e5f600000f01",
+          "lastReadAt": "2026-06-24T10:05:01.000Z"
+        }
       },
       "mutedBy": [],
       "createdAt": "2026-06-24T09:00:00.000Z",
@@ -317,8 +334,8 @@ seller for a given item. If it already exists, the existing one is returned.
 { "itemId": "64b2f0c2a1d4e5f600000111" }
 ```
 
-| Field | Type | Rules |
-| ----- | ---- | ----- |
+| Field    | Type            | Rules                                             |
+| -------- | --------------- | ------------------------------------------------- |
 | `itemId` | string (24-hex) | Required. The marketplace item being asked about. |
 
 > The **seller is derived from the item** server-side — you do **not** send a seller/recipient
@@ -347,7 +364,13 @@ Fetch one conversation with the marketplace item **refreshed live**.
   "conversation": {
     "_id": "64b2f0c2a1d4e5f600000abc",
     "itemId": "64b2f0c2a1d4e5f600000111",
-    "item": { "title": "Mountain bike, 27.5\"", "thumbnailUrl": "https://cdn.example.com/items/abc-thumb.jpg", "price": 230, "status": "Approved", "sellerId": "64b2f0c2a1d4e5f600000bbb" },
+    "item": {
+      "title": "Mountain bike, 27.5\"",
+      "thumbnailUrl": "https://cdn.example.com/items/abc-thumb.jpg",
+      "price": 230,
+      "status": "Approved",
+      "sellerId": "64b2f0c2a1d4e5f600000bbb"
+    },
     "itemLive": { "price": 230, "status": "Approved", "hidden": false },
     "participantIds": ["64b2f0c2a1d4e5f600000aaa", "64b2f0c2a1d4e5f600000bbb"],
     "participants": { "...": "..." },
@@ -370,10 +393,10 @@ Fetch a page of messages, **newest-first**, with keyset pagination.
 - **Path param:** `conversationId` (24-hex).
 - **Query params:**
 
-| Param | Type | Rules |
-| ----- | ---- | ----- |
+| Param    | Type            | Rules                                                                                                                                                     |
+| -------- | --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `before` | string (24-hex) | Optional cursor. Returns messages with `_id < before`. Pass the **oldest** `_id` you currently hold to page further back. Omit for the first/newest page. |
-| `limit` | integer | Optional. `1`–`100`. **Default `50`.** |
+| `limit`  | integer         | Optional. `1`–`100`. **Default `50`.**                                                                                                                    |
 
 - **Example:** `GET {BASE_URL}/conversations/64b2f0c2a1d4e5f600000abc/messages?before=64b2f0c2a1d4e5f600000f10&limit=30`
 - **200 response:** `{ "messages": Message[] }` — **descending `_id`** (newest first):
@@ -419,12 +442,12 @@ when the socket is unavailable.
 }
 ```
 
-| Field | Type | Rules |
-| ----- | ---- | ----- |
-| `clientMessageId` | string | **Required. UUID v4.** Idempotency key (see §3.1). |
-| `type` | `"text"` \| `"image"` \| `"file"` | Required. |
-| `body` | string | Trimmed length **1–4000**. **Required & non-empty when `type === "text"`**; optional otherwise. HTML-escaped server-side. |
-| `attachments` | `Attachment[]` | Optional. Each: `{ key, url, mime, size, width?, height? }` — `url` must be a valid URL, `size` an int ≥ 0, `width`/`height` ints > 0. |
+| Field             | Type                              | Rules                                                                                                                                  |
+| ----------------- | --------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `clientMessageId` | string                            | **Required. UUID v4.** Idempotency key (see §3.1).                                                                                     |
+| `type`            | `"text"` \| `"image"` \| `"file"` | Required.                                                                                                                              |
+| `body`            | string                            | Trimmed length **1–4000**. **Required & non-empty when `type === "text"`**; optional otherwise. HTML-escaped server-side.              |
+| `attachments`     | `Attachment[]`                    | Optional. Each: `{ key, url, mime, size, width?, height? }` — `url` must be a valid URL, `size` an int ≥ 0, `width`/`height` ints > 0. |
 
 - **201 response:** `{ "message": Message }` (the persisted message, with its real `_id`,
   `createdAt`, and the same `clientMessageId` you sent).
@@ -433,51 +456,70 @@ when the socket is unavailable.
 
 > Sending a duplicate `clientMessageId` is **not** an error — you get the original message back.
 
-### 5.6 `POST /uploads/presign` — presigned upload for attachments
+### 5.6 `POST /uploads/images` — upload images (server-proxied to Cloudflare)
 
-Get a short-lived presigned **PUT** URL so the client uploads bytes **directly** to object
-storage (DigitalOcean Spaces / S3); the chat server never handles the file.
+Upload **1–5 images in a single `multipart/form-data` request**. The chat server forwards each
+file to Cloudflare Images and returns the delivery URLs. Works the same for web and mobile.
 
 - **Auth:** required.
-- **Request body:**
+- **Content-Type:** `multipart/form-data`.
+- **Form field:** `images` — repeatable (send the field once per file). The singular `image` is
+  also accepted for compatibility.
 
-```json
-{ "mime": "image/png", "size": 184320, "filename": "photo.png" }
-```
+| Rule                  | Value                                                |
+| --------------------- | ---------------------------------------------------- |
+| Max files per request | **5**                                                |
+| Max size per file     | **10 MB**                                            |
+| Allowed mime types    | `image/jpeg`, `image/png`, `image/webp`, `image/gif` |
 
-| Field | Type | Rules |
-| ----- | ---- | ----- |
-| `mime` | string | Required. Allowed: `image/jpeg`, `image/png`, `image/webp`, `image/gif`, `application/pdf`. Others → `400 VALIDATION`. |
-| `size` | integer | Required, > 0. **Max 10 MB** (`10485760`); larger → `400 VALIDATION`. |
-| `filename` | string | Optional. Only its extension is used to build the object key. |
-
-- **200 response:**
+- **200 response** (partial success — see below):
 
 ```json
 {
-  "url": "https://nyc3.digitaloceanspaces.com/your-bucket/chat/<userId>/<uuid>.png?X-Amz-...",
-  "key": "chat/<userId>/<uuid>.png",
-  "expiresIn": 300
+  "images": [
+    {
+      "id": "cf-image-id",
+      "key": "cf-image-id",
+      "url": "https://imagedelivery.net/<hash>/cf-image-id/public",
+      "mime": "image/jpeg",
+      "size": 184320,
+      "filename": "photo.jpg"
+    }
+  ],
+  "failed": [{ "filename": "broken.png", "error": "upload_failed" }],
+  "imageUrls": ["https://imagedelivery.net/<hash>/cf-image-id/public"]
 }
 ```
 
-| Field | Meaning |
-| ----- | ------- |
-| `url` | Presigned **PUT** URL. `PUT` the raw bytes here within `expiresIn` seconds. Set the request `Content-Type` to the same `mime`. |
-| `key` | The final object key. Use it as `attachment.key` in your `message:send`. |
-| `expiresIn` | URL lifetime in seconds (**300**). |
+| Field       | Meaning                                                                                |
+| ----------- | -------------------------------------------------------------------------------------- |
+| `images`    | Successfully uploaded images. Each object is **attachment-ready** — see mapping below. |
+| `failed`    | Files that failed to upload (e.g. a transient Cloudflare error). Retry just these.     |
+| `imageUrls` | Flat list of the succeeded delivery URLs (convenience).                                |
 
-- **Error cases:** uploads not configured on the server → `503 UNAVAILABLE`; bad mime/size →
-  `400 VALIDATION`.
+- **Partial failures:** if some files upload and others fail, you still get **200** with the
+  succeeded files in `images` and the rest in `failed` — retry only the `failed` ones. If **every**
+  file fails, the request returns **503 UNAVAILABLE**.
+- **Error cases:** uploads not configured on the server → `503 UNAVAILABLE`; no files / more than 5
+  / non-image mime / file over 10 MB → `400 VALIDATION`; missing token → `401`; over rate limit →
+  `429`.
+
+**Mapping a returned image onto a message attachment** — each `images[i]` maps directly:
+
+| `attachment` field | from `images[i]`                                                        |
+| ------------------ | ----------------------------------------------------------------------- |
+| `key`              | `key` (the Cloudflare image id — enables server-side cleanup on unsend) |
+| `url`              | `url`                                                                   |
+| `mime`             | `mime`                                                                  |
+| `size`             | `size`                                                                  |
+| `width` / `height` | omit — the server can't know them; supply them yourself if you do       |
 
 **Attachment upload flow:**
-1. `POST /uploads/presign` → `{ url, key, expiresIn }`.
-2. `PUT` the file bytes to `url` (direct to storage) with `Content-Type: <mime>`.
-3. Build the **public** object URL for `attachment.url`. The presign response does not return
-   the public URL directly; construct it from your storage's public/CDN base + `key` (confirm
-   the exact base with the backend team — it depends on the Spaces/CDN config).
-4. Send `message:send` (or REST send) with `type: "image" | "file"` and
-   `attachments: [{ key, url, mime, size, width?, height? }]`.
+
+1. `POST /uploads/images` with your files under the `images` field → `{ images, failed, imageUrls }`.
+2. Retry any `failed` entries if needed.
+3. Send `message:send` (or REST send) with `type: "image"` and
+   `attachments: images.map(i => ({ key: i.key, url: i.url, mime: i.mime, size: i.size }))`.
 
 ### 5.7 `DELETE /conversations/:conversationId` — delete conversation (for me)
 
@@ -505,8 +547,8 @@ Toggle **push-notification** suppression for this conversation, for **you** only
 { "muted": true }
 ```
 
-| Field | Type | Rules |
-| ----- | ---- | ----- |
+| Field   | Type    | Rules                                    |
+| ------- | ------- | ---------------------------------------- |
 | `muted` | boolean | Required. `true` mutes, `false` unmutes. |
 
 - **200 response:** `{ "ok": true, "muted": true }`.
@@ -545,10 +587,10 @@ existing token reassigns it to the current user (correct for shared devices).
 { "token": "ExponentPushToken[xxxxxxxxxxxxxxxxxxxxxx]", "platform": "android" }
 ```
 
-| Field | Type | Rules |
-| ----- | ---- | ----- |
-| `token` | string | Required, non-empty. The device's `ExponentPushToken[...]`. |
-| `platform` | `"ios"` \| `"android"` \| `"web"` | Required. |
+| Field      | Type                              | Rules                                                       |
+| ---------- | --------------------------------- | ----------------------------------------------------------- |
+| `token`    | string                            | Required, non-empty. The device's `ExponentPushToken[...]`. |
+| `platform` | `"ios"` \| `"android"` \| `"web"` | Required.                                                   |
 
 - **201 response:** `{ "ok": true }`.
 - **Error cases:** missing token / bad platform → `400 VALIDATION`.
@@ -567,11 +609,11 @@ another user's token).
 
 ### 5.12 Health endpoints (informational, no auth)
 
-| Method | Path | Meaning |
-| ------ | ---- | ------- |
-| GET | `/healthz` | Liveness — `{ "status": "ok" }`. |
-| GET | `/readyz` | Readiness — `200 {"status":"ready"}` or `503 {"status":"not-ready"}`. |
-| GET | `/metrics` | Prometheus metrics (ops only). |
+| Method | Path       | Meaning                                                               |
+| ------ | ---------- | --------------------------------------------------------------------- |
+| GET    | `/healthz` | Liveness — `{ "status": "ok" }`.                                      |
+| GET    | `/readyz`  | Readiness — `200 {"status":"ready"}` or `503 {"status":"not-ready"}`. |
+| GET    | `/metrics` | Prometheus metrics (ops only).                                        |
 
 Unknown routes return `404` with `{ "error": { "code": "NOT_FOUND", "message": "Route not found" } }`.
 
@@ -600,8 +642,8 @@ Primary send path. Same contract & effects as REST §5.5.
 }
 ```
 
-  Same field rules as REST send (§5.5): `clientMessageId` UUID v4; `type` enum; `body` 1–4000
-  and required when `type === 'text'`; `attachments` optional.
+Same field rules as REST send (§5.5): `clientMessageId` UUID v4; `type` enum; `body` 1–4000
+and required when `type === 'text'`; `attachments` optional.
 
 - **Ack (success):** `{ "ok": true, "message": Message }`
 - **Ack (failure):** `{ "ok": false, "error": { "code": "...", "message": "...", "details"?: {} } }`
@@ -610,8 +652,9 @@ Primary send path. Same contract & effects as REST §5.5.
 
 ```js
 socket.emit('message:send', payload, (ack) => {
-  if (ack.ok) replaceOptimistic(ack.message);          // ack.message has real _id/createdAt
-  else handleError(ack.error);                          // e.g. RATE_LIMITED, FORBIDDEN
+  if (ack.ok)
+    replaceOptimistic(ack.message); // ack.message has real _id/createdAt
+  else handleError(ack.error); // e.g. RATE_LIMITED, FORBIDDEN
 });
 ```
 
@@ -675,7 +718,20 @@ Register listeners for these as soon as you connect.
 #### `message:new` — a new message arrived
 
 ```json
-{ "message": { "_id": "…", "conversationId": "…", "senderId": "…", "clientMessageId": "…", "type": "text", "body": "Hi", "attachments": [], "status": "sent", "deletedAt": null, "createdAt": "2026-06-24T10:07:00.000Z" } }
+{
+  "message": {
+    "_id": "…",
+    "conversationId": "…",
+    "senderId": "…",
+    "clientMessageId": "…",
+    "type": "text",
+    "body": "Hi",
+    "attachments": [],
+    "status": "sent",
+    "deletedAt": null,
+    "createdAt": "2026-06-24T10:07:00.000Z"
+  }
+}
 ```
 
 Fires for messages from the other participant **and** as an echo of your own sends (covers
@@ -803,23 +859,29 @@ setInterval(() => socket.connected && socket.emit('presence:heartbeat'), 45000);
 **Every** error — REST response body and socket ack `error` — has this shape:
 
 ```json
-{ "error": { "code": "VALIDATION", "message": "Invalid request", "details": { "body": ["Text messages require a body"] } } }
+{
+  "error": {
+    "code": "VALIDATION",
+    "message": "Invalid request",
+    "details": { "body": ["Text messages require a body"] }
+  }
+}
 ```
 
 (For socket acks the envelope is `{ ok: false, error: { code, message, details? } }` — the
 `error` object is the same.) `details` is present mainly on validation errors and maps field →
 messages.
 
-| `code` | HTTP | When |
-| ------ | ---- | ---- |
-| `VALIDATION` | 400 | Bad/missing field, bad ObjectId/UUID, body too long, text with empty body, unsupported mime/oversized upload. |
-| `UNAUTHENTICATED` | 401 | Missing/invalid token. |
-| `FORBIDDEN` | 403 | Not a participant of the conversation; item unavailable on create. |
-| `NOT_FOUND` | 404 | Unknown conversation/item/route. |
-| `CONFLICT` | 409 | Duplicate-key collision. |
-| `RATE_LIMITED` | 429 | Over a rate limit (see §3.5) — back off. |
-| `UNAVAILABLE` | 503 | Dependency down (e.g. uploads not configured; readiness not-ready). |
-| `INTERNAL` | 500 | Unexpected server error. |
+| `code`            | HTTP | When                                                                                                          |
+| ----------------- | ---- | ------------------------------------------------------------------------------------------------------------- |
+| `VALIDATION`      | 400  | Bad/missing field, bad ObjectId/UUID, body too long, text with empty body, unsupported mime/oversized upload. |
+| `UNAUTHENTICATED` | 401  | Missing/invalid token.                                                                                        |
+| `FORBIDDEN`       | 403  | Not a participant of the conversation; item unavailable on create.                                            |
+| `NOT_FOUND`       | 404  | Unknown conversation/item/route.                                                                              |
+| `CONFLICT`        | 409  | Duplicate-key collision.                                                                                      |
+| `RATE_LIMITED`    | 429  | Over a rate limit (see §3.5) — back off.                                                                      |
+| `UNAVAILABLE`     | 503  | Dependency down (e.g. uploads not configured; readiness not-ready).                                           |
+| `INTERNAL`        | 500  | Unexpected server error.                                                                                      |
 
 **Handle by `code`, not by string-matching `message`** (messages may change).
 
@@ -846,9 +908,9 @@ Brief guidance, not prescriptive code (this doc is a contract spec). A clean lay
   from your auth store and normalizes errors to `{ code, message, details }`. One function per
   route in §5.
 - **Conversations store** — keyed by `conversationId`; holds the `Conversation` (inbox snapshot
-  + opened overlay), `unreadCounts`, `readState`, presence, and typing flags.
+  - opened overlay), `unreadCounts`, `readState`, presence, and typing flags.
 - **Messages store** — per-conversation list ordered by `_id`, plus a `clientMessageId →
-  message` index for optimistic reconcile and dedupe of `message:new` echoes.
+message` index for optimistic reconcile and dedupe of `message:new` echoes.
 - **Outbox** — pending sends keyed by `clientMessageId` with status `sending|sent|failed`;
   retries reuse the same id (idempotent). Falls back to REST send when the socket is down.
 - **IDs/UUIDs** — generate `clientMessageId` with `expo-crypto`'s `randomUUID()` or
@@ -863,36 +925,36 @@ Brief guidance, not prescriptive code (this doc is a contract spec). A clean lay
 
 ### 10.1 REST routes
 
-| Method | Path | Auth | Body / Query | Success |
-| ------ | ---- | ---- | ------------ | ------- |
-| GET | `/conversations` | ✅ | — | `200 { conversations }` |
-| POST | `/conversations` | ✅ (10/60s) | `{ itemId }` | `201 { conversation }` |
-| GET | `/conversations/:id` | ✅ | — | `200 { conversation + itemLive }` |
-| DELETE | `/conversations/:id` | ✅ | — | `200 { ok }` — "delete for me" (hides from MY inbox; a new message resurfaces it) |
-| PATCH | `/conversations/:id/mute` | ✅ | `{ muted: boolean }` | `200 { ok, muted }` — mutes/unmutes push for me |
-| GET | `/conversations/:id/messages` | ✅ | `?before&limit(1-100,def 50)` | `200 { messages }` newest-first |
-| POST | `/conversations/:id/messages` | ✅ (30/10s) | `{ clientMessageId, type, body?, attachments? }` | `201 { message }` |
-| DELETE | `/conversations/:id/messages/:messageId` | ✅ | — | `200 { ok, messageId }` — unsend for everyone (sender-only) |
-| POST | `/uploads/presign` | ✅ | `{ mime, size, filename? }` | `200 { url, key, expiresIn }` |
-| POST | `/devices` | ✅ | `{ token, platform }` | `201 { ok }` — register Expo push token |
-| DELETE | `/devices` | ✅ | `{ token }` | `200 { ok }` — unregister on logout |
-| GET | `/healthz` `/readyz` `/metrics` | — | — | health/metrics |
+| Method | Path                                     | Auth        | Body / Query                                                         | Success                                                                           |
+| ------ | ---------------------------------------- | ----------- | -------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
+| GET    | `/conversations`                         | ✅          | —                                                                    | `200 { conversations }`                                                           |
+| POST   | `/conversations`                         | ✅ (10/60s) | `{ itemId }`                                                         | `201 { conversation }`                                                            |
+| GET    | `/conversations/:id`                     | ✅          | —                                                                    | `200 { conversation + itemLive }`                                                 |
+| DELETE | `/conversations/:id`                     | ✅          | —                                                                    | `200 { ok }` — "delete for me" (hides from MY inbox; a new message resurfaces it) |
+| PATCH  | `/conversations/:id/mute`                | ✅          | `{ muted: boolean }`                                                 | `200 { ok, muted }` — mutes/unmutes push for me                                   |
+| GET    | `/conversations/:id/messages`            | ✅          | `?before&limit(1-100,def 50)`                                        | `200 { messages }` newest-first                                                   |
+| POST   | `/conversations/:id/messages`            | ✅ (30/10s) | `{ clientMessageId, type, body?, attachments? }`                     | `201 { message }`                                                                 |
+| DELETE | `/conversations/:id/messages/:messageId` | ✅          | —                                                                    | `200 { ok, messageId }` — unsend for everyone (sender-only)                       |
+| POST   | `/uploads/images`                        | ✅ (20/60s) | `multipart/form-data` — field `images` (1–5 files, ≤10 MB, image/\*) | `200 { images, failed, imageUrls }`                                               |
+| POST   | `/devices`                               | ✅          | `{ token, platform }`                                                | `201 { ok }` — register Expo push token                                           |
+| DELETE | `/devices`                               | ✅          | `{ token }`                                                          | `200 { ok }` — unregister on logout                                               |
+| GET    | `/healthz` `/readyz` `/metrics`          | —           | —                                                                    | health/metrics                                                                    |
 
 ### 10.2 Socket events
 
-| Direction | Event | Payload | Ack |
-| --------- | ----- | ------- | --- |
-| C→S | `message:send` | `{ conversationId, clientMessageId, type, body?, attachments? }` | `{ ok, message }` / `{ ok:false, error }` |
-| C→S | `message:delivered` | `{ conversationId, messageId }` | `{ ok }` |
-| C→S | `message:read` | `{ conversationId, upToMessageId? }` | `{ ok }` |
-| C→S | `typing:start` / `typing:stop` | `{ conversationId }` | none |
-| C→S | `conversation:sync` | `{ cursors: { [convId]: msgId } }` | `{ ok, missed[] }` |
-| C→S | `presence:heartbeat` | — | none |
-| S→C | `message:new` | `{ message }` | — |
-| S→C | `message:deleted` | `{ conversationId, messageId }` | — (an unsend — render the message as deleted) |
-| S→C | `receipt:update` | `{ conversationId, userId, deliveredMessageId? , lastReadMessageId? }` | — |
-| S→C | `typing` | `{ conversationId, userId, isTyping }` | — |
-| S→C | `presence:update` | `{ userId, status, lastSeenAt? }` | — |
+| Direction | Event                          | Payload                                                                | Ack                                           |
+| --------- | ------------------------------ | ---------------------------------------------------------------------- | --------------------------------------------- |
+| C→S       | `message:send`                 | `{ conversationId, clientMessageId, type, body?, attachments? }`       | `{ ok, message }` / `{ ok:false, error }`     |
+| C→S       | `message:delivered`            | `{ conversationId, messageId }`                                        | `{ ok }`                                      |
+| C→S       | `message:read`                 | `{ conversationId, upToMessageId? }`                                   | `{ ok }`                                      |
+| C→S       | `typing:start` / `typing:stop` | `{ conversationId }`                                                   | none                                          |
+| C→S       | `conversation:sync`            | `{ cursors: { [convId]: msgId } }`                                     | `{ ok, missed[] }`                            |
+| C→S       | `presence:heartbeat`           | —                                                                      | none                                          |
+| S→C       | `message:new`                  | `{ message }`                                                          | —                                             |
+| S→C       | `message:deleted`              | `{ conversationId, messageId }`                                        | — (an unsend — render the message as deleted) |
+| S→C       | `receipt:update`               | `{ conversationId, userId, deliveredMessageId? , lastReadMessageId? }` | —                                             |
+| S→C       | `typing`                       | `{ conversationId, userId, isTyping }`                                 | —                                             |
+| S→C       | `presence:update`              | `{ userId, status, lastSeenAt? }`                                      | —                                             |
 
 ### 10.3 Validation quick rules
 
@@ -901,17 +963,17 @@ Brief guidance, not prescriptive code (this doc is a contract spec). A clean lay
 - `type`: `text | image | file`. `limit`: int 1–100 (default 50).
 - `attachment`: `{ key:str, url:URL, mime:str, size:int≥0, width?:int>0, height?:int>0 }`.
 - `attachments`: **at most 5** per message; `image`/`file` messages require **≥1** attachment.
-- Upload: mime ∈ {jpeg,png,webp,gif,pdf}; size ≤ 10 MB; presign URL TTL 300 s.
+- Upload (`POST /uploads/images`): multipart field `images`; ≤5 files; each ≤10 MB; mime ∈ {jpeg,png,webp,gif}.
 - `platform` (devices): `ios | android | web`. `token`: an `ExponentPushToken[...]`.
 
 ### 10.4 Server config knobs that affect the client
 
-| Env var | Default | Client impact |
-| ------- | ------- | ------------- |
-| `PORT` | `3000` | Base URL / socket origin. |
-| `CORS_ORIGINS` | `*` | Must include your web origin (RN native is unaffected; Expo web isn't). `credentials: true`. |
-| `AUTH_MODE` | `dev` | `dev` → token = userId; `jwt` → token = signed JWT (same wiring). |
-| `EXPO_ACCESS_TOKEN` | — | Server-side only; push works without it. No client impact. |
+| Env var             | Default | Client impact                                                                                |
+| ------------------- | ------- | -------------------------------------------------------------------------------------------- |
+| `PORT`              | `3000`  | Base URL / socket origin.                                                                    |
+| `CORS_ORIGINS`      | `*`     | Must include your web origin (RN native is unaffected; Expo web isn't). `credentials: true`. |
+| `AUTH_MODE`         | `dev`   | `dev` → token = userId; `jwt` → token = signed JWT (same wiring).                            |
+| `EXPO_ACCESS_TOKEN` | —       | Server-side only; push works without it. No client impact.                                   |
 
 ### 10.5 Push notifications, delete & mute (behavior)
 
@@ -938,17 +1000,20 @@ Muting does **not** stop unread counts — only push. The `muted` state is per-p
 
 ### 10.6 Source-of-truth files (server)
 
-| Contract | File |
-| -------- | ---- |
-| Event names | `src/realtime/events.js` |
-| Limits / enums / rate limits | `src/config/constants.js` |
-| Shared validators | `src/common/validation/index.js` |
-| Error codes & shape | `src/common/errors/AppError.js` |
-| Conversation routes/controller | `src/modules/conversations/conversation.{routes,controller}.js` |
-| Message routes/controller | `src/modules/messages/message.{routes,controller}.js` |
-| Socket handlers | `src/realtime/handlers/{message,typing,presence}.handler.js` |
-| Connection lifecycle / rooms | `src/realtime/gateway.js`, `src/realtime/rooms.js` |
-| Upload presign | `src/modules/uploads/upload.{routes,controller,service}.js` |
-| Devices / push (Expo) | `src/modules/notifications/{device.routes,device.controller,device.repository,notification.service,push.provider}.js` |
-| App wiring (mounts, error handler) | `src/loaders/express.js`, `src/loaders/socket.js` |
+| Contract                           | File                                                                                                                  |
+| ---------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| Event names                        | `src/realtime/events.js`                                                                                              |
+| Limits / enums / rate limits       | `src/config/constants.js`                                                                                             |
+| Shared validators                  | `src/common/validation/index.js`                                                                                      |
+| Error codes & shape                | `src/common/errors/AppError.js`                                                                                       |
+| Conversation routes/controller     | `src/modules/conversations/conversation.{routes,controller}.js`                                                       |
+| Message routes/controller          | `src/modules/messages/message.{routes,controller}.js`                                                                 |
+| Socket handlers                    | `src/realtime/handlers/{message,typing,presence}.handler.js`                                                          |
+| Connection lifecycle / rooms       | `src/realtime/gateway.js`, `src/realtime/rooms.js`                                                                    |
+| Image upload                       | `src/modules/uploads/{upload.routes,upload.controller,upload.service,cloudflareImages.client}.js`                     |
+| Devices / push (Expo)              | `src/modules/notifications/{device.routes,device.controller,device.repository,notification.service,push.provider}.js` |
+| App wiring (mounts, error handler) | `src/loaders/express.js`, `src/loaders/socket.js`                                                                     |
+
+```
+
 ```

@@ -1,20 +1,19 @@
 /**
  * Layer: Transport (REST controller).
- * Upload HTTP endpoint (POST /uploads/presign): validate the requested mime/size, call
- * uploadService, return { url, key } to the client. Must NOT hold business logic or touch the DB.
+ * Upload HTTP endpoint (POST /uploads/images): flatten the multipart files (multer has already
+ * parsed + validated them), call uploadService, return the uploaded images plus any `failed`
+ * entries (partial-success contract) and a flat `imageUrls` list for convenience.
+ * Must NOT hold business logic or touch the DB.
  */
 import { asyncHandler } from '../../common/errors/asyncHandler.js';
 
 export function createUploadController({ uploadService }) {
   return {
-    presign: asyncHandler(async (req, res) => {
-      const result = await uploadService.presign({
-        userId: req.userId,
-        mime: req.body.mime,
-        size: req.body.size,
-        filename: req.body.filename,
-      });
-      res.json(result);
+    uploadImages: asyncHandler(async (req, res) => {
+      // Accept both the primary `images` field and the singular `image` (main-BE parity).
+      const files = [...(req.files?.images ?? []), ...(req.files?.image ?? [])];
+      const { images, failed } = await uploadService.uploadMany(files, { userId: req.userId });
+      res.json({ images, failed, imageUrls: images.map((i) => i.url) });
     }),
   };
 }

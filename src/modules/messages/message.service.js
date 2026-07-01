@@ -30,12 +30,14 @@ export class MessageService {
     gateway,
     notificationService,
     presenceService,
+    uploadService,
   }) {
     this.repo = messageRepository;
     this.conversations = conversationService;
     this.gateway = gateway;
     this.notifications = notificationService;
     this.presence = presenceService;
+    this.uploads = uploadService;
   }
 
   async send({ conversationId, senderId, clientMessageId, type, body, attachments = [] }) {
@@ -116,6 +118,9 @@ export class MessageService {
     }
     if (msg.deletedAt) return msg; // already unsent — idempotent, no re-emit
 
+    // Capture attachments BEFORE softDelete clears them, so we can clean up their Cloudflare images.
+    const doomedAttachments = msg.attachments || [];
+
     const updated = await this.repo.softDelete(oid(conversationId), oid(messageId));
 
     // If the unsent message was the inbox preview, recompute it from the newest message.
@@ -139,6 +144,10 @@ export class MessageService {
       conversationId,
       messageId: String(messageId),
     });
+
+    // Best-effort remote cleanup: delete the message's images from Cloudflare. Fire-and-forget so
+    // unsend latency is unaffected; deleteImages swallows all errors internally (never throws).
+    void this.uploads?.deleteImages(doomedAttachments);
 
     return updated;
   }

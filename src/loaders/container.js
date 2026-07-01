@@ -42,6 +42,7 @@ import { DeviceRepository } from '../modules/notifications/device.repository.js'
 import { ExpoPushProvider } from '../modules/notifications/push.provider.js';
 import { DeviceModel } from '../modules/notifications/device.model.js';
 
+import { CloudflareImagesClient } from '../modules/uploads/cloudflareImages.client.js';
 import { UploadService } from '../modules/uploads/upload.service.js';
 
 import { Gateway } from '../realtime/gateway.js';
@@ -86,6 +87,14 @@ export function buildContainer({ gratisConn }) {
   const notificationService = new NotificationService({ deviceRepository, pushProvider });
   const gateway = new Gateway();
 
+  // --- Uploads (built BEFORE messages so unsend can clean up Cloudflare images) ---
+  const cloudflareImages = new CloudflareImagesClient({
+    accountId: config.CLOUDFLARE_ACCOUNT_ID,
+    apiToken: config.CLOUDFLARE_IMAGES_TOKEN,
+    variant: config.CLOUDFLARE_IMAGES_VARIANT,
+  });
+  const uploadService = new UploadService({ cloudflareImages });
+
   // --- Messages (single write path) ---
   const messageService = new MessageService({
     messageRepository,
@@ -93,10 +102,8 @@ export function buildContainer({ gratisConn }) {
     gateway,
     notificationService,
     presenceService,
+    uploadService,
   });
-
-  // --- Uploads ---
-  const uploadService = new UploadService();
 
   logger.info(
     { authMode: config.AUTH_MODE, messageStore: config.MESSAGE_STORE },
