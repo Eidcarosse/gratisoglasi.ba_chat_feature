@@ -41,7 +41,8 @@ export const LIMITS = Object.freeze({
 export const RATE_LIMITS = Object.freeze({
   MESSAGE_SEND: { windowMs: 10_000, max: 30 },
   NEW_CONVERSATION: { windowMs: 60_000, max: 10 },
-  // Image upload is server-proxied (buffers bytes in memory) — throttled to curb memory abuse.
+  // Image upload only mints one-time Cloudflare direct-upload URLs (no bytes touch us); the cap
+  // just blunts abuse of the Cloudflare API / URL minting. Each request mints up to MAX_ATTACHMENTS.
   IMAGE_UPLOAD: { windowMs: 60_000, max: 20 },
   DEFAULT: { windowMs: 60_000, max: 300 },
 });

@@ -13,6 +13,12 @@
 import mongoose from 'mongoose';
 import { MESSAGE_TYPES, MESSAGE_STATUS } from '../../config/constants.js';
 
+// `key` is the Cloudflare image id (also returned to the client by the direct-upload flow). It is
+// what makes an attached image a first-class, addressable record: unsend cleanup deletes by it, and
+// a FUTURE async moderation worker can approve/serve/delete an image by it. MODERATION SEAM: gating
+// an image's visibility on moderation later is an ADDITIVE change here — add an optional
+// `status: 'pending'|'approved'|'rejected'` field (Mongo needs no migration) and have the send path
+// consult it. Nothing in the current schema precludes that; see upload.service.js TODO(moderation).
 const attachmentSchema = new mongoose.Schema(
   {
     key: String,

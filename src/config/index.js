@@ -40,7 +40,7 @@ const envSchema = z
           .filter(Boolean),
       ),
 
-    // Cloudflare Images (uploads). Optional — the /uploads/images route 503s if unset. The
+    // Cloudflare Images (uploads). Optional — the /uploads/direct-upload route 503s if unset. The
     // runtime "enabled" gate is Boolean(CLOUDFLARE_ACCOUNT_ID && CLOUDFLARE_IMAGES_TOKEN).
     CLOUDFLARE_ACCOUNT_ID: z.string().optional(),
     CLOUDFLARE_IMAGES_TOKEN: z.string().optional(),

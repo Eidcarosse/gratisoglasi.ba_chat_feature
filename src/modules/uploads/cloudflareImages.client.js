@@ -1,13 +1,18 @@
 /**
  * Layer: Integration client (low-level Cloudflare Images REST wrapper).
- * Server-proxy upload: the chat server forwards a file buffer to Cloudflare Images'
- * `POST /accounts/<id>/images/v1` (multipart, field name `file`) and reads back the delivery URL —
- * mirroring the main marketplace backend's flow. Also deletes an image by id on message unsend.
+ * Direct Creator Upload flow: the chat server asks Cloudflare for a ONE-TIME upload URL
+ * (`POST /accounts/<id>/images/v2/direct_upload`, a tiny JSON call — NO file bytes) and hands it to
+ * the client, which uploads the image bytes DIRECTLY to Cloudflare. The chat server never sees,
+ * buffers, or re-encodes image bytes. Also deletes an image by id on message unsend.
+ *
+ * Why direct upload: the previous server-proxy flow buffered every image in RAM and re-streamed it
+ * to Cloudflare on the same single-process event loop that serves realtime chat — causing GC
+ * pressure, memory spikes, and PM2 restarts under load. Minting a one-time URL is O(bytes)=0 on us.
  *
  * Credentials/variant are passed via the CONSTRUCTOR (not read from config) so the client is
- * unit-testable with fake creds + a stubbed global fetch. Uses Node ≥20 globals (fetch/FormData/
- * Blob) — no axios or form-data dependency. NEVER logs the Authorization header or raw Cloudflare
- * error bodies (the API token is a Bearer secret).
+ * unit-testable with fake creds + a stubbed global fetch. Uses Node ≥20 globals (fetch/FormData) —
+ * no axios or form-data dependency. NEVER logs the Authorization header or raw Cloudflare error
+ * bodies (the API token is a Bearer secret).
  */
 export class CloudflareImagesClient {
   constructor({ accountId, apiToken, variant = 'public', timeoutMs = 30_000 } = {}) {
@@ -17,27 +22,34 @@ export class CloudflareImagesClient {
     this.timeoutMs = timeoutMs;
     // "enabled" gate — no network call on construction. Matches the presign-era 503 behavior.
     this.enabled = Boolean(accountId && apiToken);
+    // v1 = per-image operations (delete). v2/direct_upload = mint a one-time creator-upload URL.
     this.baseUrl = `https://api.cloudflare.com/client/v4/accounts/${accountId}/images/v1`;
+    this.directUploadUrl = `https://api.cloudflare.com/client/v4/accounts/${accountId}/images/v2/direct_upload`;
   }
 
   /**
-   * Upload one image buffer to Cloudflare Images.
-   * @returns {Promise<{ id: string, url: string }>} the image id + selected variant delivery URL.
+   * Mint a ONE-TIME direct-creator-upload URL. Returns the URL the client POSTs its file to
+   * (multipart field `file`) plus the image `id` the image will have once uploaded. No bytes flow
+   * through us. The URL is single-use and expires (see `expiryMinutes`).
+   *
+   * @param {object} [opts]
+   * @param {object} [opts.metadata]           arbitrary tags stored on the image (e.g. {source:'chat'})
+   * @param {boolean} [opts.requireSignedURLs]  false → delivery URLs are publicly viewable
+   * @param {number} [opts.expiryMinutes]       URL validity window; Cloudflare requires 2min–6h
+   * @returns {Promise<{ id: string, uploadURL: string }>}
    */
-  async uploadImage({ buffer, filename, mime }) {
+  async createDirectUploadUrl({ metadata, requireSignedURLs = false, expiryMinutes = 30 } = {}) {
     const form = new FormData();
-    // Cloudflare expects the multipart field name to be exactly "file".
-    form.append('file', new Blob([buffer], { type: mime }), filename);
-    // Serve public (unsigned) delivery URLs so the returned URL is viewable without a signature.
-    form.append('requireSignedURLs', 'false');
-    // Tag chat-origin images so they stay identifiable if this Cloudflare account is shared with the
-    // main site's listing images (see docs) — enables safe auditing/cleanup scoped to chat uploads.
-    form.append('metadata', JSON.stringify({ source: 'chat' }));
+    form.append('requireSignedURLs', requireSignedURLs ? 'true' : 'false');
+    if (metadata) form.append('metadata', JSON.stringify(metadata));
+    // Cloudflare requires `expiry` to be an RFC-3339 timestamp between now+2min and now+6h.
+    const expiry = new Date(Date.now() + expiryMinutes * 60_000).toISOString();
+    form.append('expiry', expiry);
 
     const ac = new AbortController();
     const timer = setTimeout(() => ac.abort(), this.timeoutMs);
     try {
-      const res = await fetch(this.baseUrl, {
+      const res = await fetch(this.directUploadUrl, {
         method: 'POST',
         // Do NOT set Content-Type — undici sets the multipart boundary automatically.
         headers: { Authorization: `Bearer ${this.apiToken}` },
@@ -45,14 +57,11 @@ export class CloudflareImagesClient {
         signal: ac.signal,
       });
       const json = await res.json().catch(() => ({}));
-      if (!res.ok || !json?.success || !json?.result) {
+      if (!res.ok || !json?.success || !json?.result?.uploadURL || !json?.result?.id) {
         // Never surface the token/headers or raw CF error body upstream.
-        throw new Error(`Cloudflare upload failed: ${res.status}`);
+        throw new Error(`Cloudflare direct_upload failed: ${res.status}`);
       }
-      const variants = json.result.variants ?? [];
-      const url = variants.find((v) => v.split('/').pop() === this.variant) ?? variants[0];
-      if (!url) throw new Error('Cloudflare returned no variant URL');
-      return { id: json.result.id, url };
+      return { id: json.result.id, uploadURL: json.result.uploadURL };
     } finally {
       clearTimeout(timer);
     }

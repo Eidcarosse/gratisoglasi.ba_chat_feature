@@ -1,19 +1,23 @@
 /**
  * Layer: Transport (REST controller).
- * Upload HTTP endpoint (POST /uploads/images): flatten the multipart files (multer has already
- * parsed + validated them), call uploadService, return the uploaded images plus any `failed`
- * entries (partial-success contract) and a flat `imageUrls` list for convenience.
+ * Upload HTTP endpoint (POST /uploads/direct-upload): mint one-time Cloudflare direct-upload URLs
+ * (Direct Creator Upload flow) so the client uploads image bytes DIRECTLY to Cloudflare — no bytes
+ * ever pass through this server. Returns the URLs + image ids plus any `failed` mints (partial-
+ * success contract) and the URL expiry window.
  * Must NOT hold business logic or touch the DB.
  */
 import { asyncHandler } from '../../common/errors/asyncHandler.js';
 
 export function createUploadController({ uploadService }) {
   return {
-    uploadImages: asyncHandler(async (req, res) => {
-      // Accept both the primary `images` field and the singular `image` (main-BE parity).
-      const files = [...(req.files?.images ?? []), ...(req.files?.image ?? [])];
-      const { images, failed } = await uploadService.uploadMany(files, { userId: req.userId });
-      res.json({ images, failed, imageUrls: images.map((i) => i.url) });
+    createDirectUploads: asyncHandler(async (req, res) => {
+      // `count` is validated + defaulted (1..MAX_ATTACHMENTS) by the route's zod schema.
+      const { count } = req.body;
+      const { uploads, failed, expiresInSeconds } = await uploadService.createDirectUploads({
+        count,
+        userId: req.userId,
+      });
+      res.json({ uploads, failed, expiresInSeconds });
     }),
   };
 }

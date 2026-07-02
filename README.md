@@ -84,8 +84,8 @@ npm test                 # vitest + supertest + in-memory mongo (no Atlas needed
 | `JWT_SECRET` | when `AUTH_MODE=jwt` | ≥16 chars; boot fails fast without it. |
 | `MESSAGE_STORE` | — | `mongo` (default). `scylla` reserved for later. |
 | `PORT` · `CORS_ORIGINS` | — | Server port; comma-separated CORS allowlist (`*` default). |
-| `CLOUDFLARE_ACCOUNT_ID` · `CLOUDFLARE_IMAGES_TOKEN` | for uploads | Cloudflare Images creds. The `/uploads/images` route 503s if either is unset. |
-| `CLOUDFLARE_IMAGES_VARIANT` | — | Delivery-URL variant to return (default `public`). |
+| `CLOUDFLARE_ACCOUNT_ID` · `CLOUDFLARE_IMAGES_TOKEN` | for uploads | Cloudflare Images creds. The `/uploads/direct-upload` route 503s if either is unset. |
+| `CLOUDFLARE_IMAGES_VARIANT` | — | Delivery-URL variant clients should prefer (default `public`). |
 
 > Locally you can point both URIs at one mongod with two DB names
 > (`mongodb://localhost:27017/GratisChat` and `…/Gratis`) — that exercises the two-connection seam.

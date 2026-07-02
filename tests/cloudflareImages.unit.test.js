@@ -1,23 +1,17 @@
 /**
  * Unit tests for the Cloudflare Images client + UploadService (no app boot, no DB).
  * global fetch is stubbed; the client is constructed with explicit fake creds so nothing reads the
- * frozen env-backed config.
+ * frozen env-backed config. Covers the Direct Creator Upload flow (mint one-time URLs — no bytes
+ * ever pass through the server) plus best-effort delete on unsend.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { CloudflareImagesClient } from '../src/modules/uploads/cloudflareImages.client.js';
 import { UploadService } from '../src/modules/uploads/upload.service.js';
 
-const file = (name = 'a.jpg', mime = 'image/jpeg', size = 5) => ({
-  buffer: Buffer.from('bytes'),
-  originalname: name,
-  mimetype: mime,
-  size,
-});
-
-const okResponse = (id = 'img1', variants = [`https://imagedelivery.net/hash/${id}/public`]) => ({
+const directUploadOk = (id = 'img1', uploadURL = `https://upload.imagedelivery.net/acc/${id}-tok`) => ({
   ok: true,
   status: 200,
-  json: async () => ({ success: true, result: { id, variants } }),
+  json: async () => ({ success: true, result: { id, uploadURL } }),
 });
 
 afterEach(() => vi.unstubAllGlobals());
@@ -29,43 +23,46 @@ describe('CloudflareImagesClient', () => {
     expect(new CloudflareImagesClient({ accountId: 'acc', apiToken: 'tok' }).enabled).toBe(true);
   });
 
-  it('POSTs to the accounts URL with Bearer auth, a FormData body, and no manual Content-Type', async () => {
-    const fetchMock = vi.fn().mockResolvedValue(okResponse('img1'));
+  it('createDirectUploadUrl POSTs to the v2/direct_upload URL with Bearer auth and no bytes', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(directUploadOk('img1'));
     vi.stubGlobal('fetch', fetchMock);
 
-    const client = new CloudflareImagesClient({ accountId: 'acc', apiToken: 'tok', variant: 'public' });
-    const res = await client.uploadImage({ buffer: Buffer.from('x'), filename: 'a.jpg', mime: 'image/jpeg' });
+    const client = new CloudflareImagesClient({ accountId: 'acc', apiToken: 'tok' });
+    const res = await client.createDirectUploadUrl({ metadata: { source: 'chat' } });
 
-    expect(res).toEqual({ id: 'img1', url: 'https://imagedelivery.net/hash/img1/public' });
+    expect(res).toEqual({ id: 'img1', uploadURL: 'https://upload.imagedelivery.net/acc/img1-tok' });
     const [calledUrl, opts] = fetchMock.mock.calls[0];
-    expect(calledUrl).toBe('https://api.cloudflare.com/client/v4/accounts/acc/images/v1');
+    expect(calledUrl).toBe(
+      'https://api.cloudflare.com/client/v4/accounts/acc/images/v2/direct_upload',
+    );
     expect(opts.method).toBe('POST');
     expect(opts.headers.Authorization).toBe('Bearer tok');
+    // undici sets the multipart boundary — we must NOT set Content-Type manually.
     expect(opts.headers['Content-Type']).toBeUndefined();
     expect(opts.body).toBeInstanceOf(FormData);
-    // Chat-origin tag + unsigned delivery URLs are sent in the multipart body.
+    // No image bytes: the body carries only mint parameters.
     expect(opts.body.get('metadata')).toBe(JSON.stringify({ source: 'chat' }));
     expect(opts.body.get('requireSignedURLs')).toBe('false');
+    expect(opts.body.get('expiry')).toEqual(expect.any(String)); // RFC-3339 window
+    expect(opts.body.get('file')).toBeNull();
   });
 
-  it('selects the configured variant, falling back to variants[0]', async () => {
-    const variants = [
-      'https://imagedelivery.net/hash/img1/public',
-      'https://imagedelivery.net/hash/img1/thumb',
-    ];
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(okResponse('img1', variants)));
-
-    const client = new CloudflareImagesClient({ accountId: 'acc', apiToken: 'tok', variant: 'thumb' });
-    const res = await client.uploadImage({ buffer: Buffer.from('x'), filename: 'a.jpg', mime: 'image/jpeg' });
-    expect(res.url).toBe('https://imagedelivery.net/hash/img1/thumb');
-  });
-
-  it('throws on non-2xx or unsuccessful responses (without leaking the token)', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 500, json: async () => ({ success: false }) }));
+  it('createDirectUploadUrl throws on non-2xx / unsuccessful responses (without leaking the token)', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({ ok: false, status: 500, json: async () => ({ success: false }) }),
+    );
     const client = new CloudflareImagesClient({ accountId: 'acc', apiToken: 'tok' });
-    await expect(
-      client.uploadImage({ buffer: Buffer.from('x'), filename: 'a.jpg', mime: 'image/jpeg' }),
-    ).rejects.toThrow(/Cloudflare upload failed/);
+    await expect(client.createDirectUploadUrl()).rejects.toThrow(/direct_upload failed/);
+  });
+
+  it('createDirectUploadUrl throws when the result is missing uploadURL or id', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ success: true, result: { id: 'x' } }) }),
+    );
+    const client = new CloudflareImagesClient({ accountId: 'acc', apiToken: 'tok' });
+    await expect(client.createDirectUploadUrl()).rejects.toThrow(/direct_upload failed/);
   });
 
   it('parseImageId extracts the id from a delivery URL and is safe on garbage', () => {
@@ -75,66 +72,80 @@ describe('CloudflareImagesClient', () => {
   });
 });
 
-describe('UploadService.uploadMany', () => {
+describe('UploadService.createDirectUploads', () => {
   const svcWith = (client) => new UploadService({ cloudflareImages: client });
   const enabledClient = () => new CloudflareImagesClient({ accountId: 'acc', apiToken: 'tok' });
 
   it('503s when Cloudflare is not configured', async () => {
     const svc = svcWith(new CloudflareImagesClient({}));
-    await expect(svc.uploadMany([file()], { userId: 'u1' })).rejects.toMatchObject({ statusCode: 503 });
+    await expect(svc.createDirectUploads({ count: 1, userId: 'u1' })).rejects.toMatchObject({
+      statusCode: 503,
+    });
   });
 
-  it('returns attachment-ready objects on success', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(okResponse('img1')));
-    const { images, failed } = await svcWith(enabledClient()).uploadMany([file('a.jpg')], { userId: 'u1' });
+  it('mints N one-time upload URLs and reports the expiry window', async () => {
+    let n = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(async () => directUploadOk(`img${++n}`)),
+    );
+    const { uploads, failed, expiresInSeconds } = await svcWith(enabledClient()).createDirectUploads({
+      count: 3,
+      userId: 'u1',
+    });
     expect(failed).toEqual([]);
-    expect(images).toEqual([
-      {
-        id: 'img1',
-        key: 'img1',
-        url: 'https://imagedelivery.net/hash/img1/public',
-        mime: 'image/jpeg',
-        size: 5,
-        filename: 'a.jpg',
-      },
-    ]);
+    expect(uploads).toHaveLength(3);
+    for (const u of uploads) {
+      expect(u.id).toMatch(/^img\d$/);
+      expect(u.uploadURL).toContain('upload.imagedelivery.net');
+    }
+    expect(expiresInSeconds).toBeGreaterThan(0);
+  });
+
+  it('defaults count to 1 when omitted', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(directUploadOk('only')));
+    const { uploads } = await svcWith(enabledClient()).createDirectUploads({ userId: 'u1' });
+    expect(uploads).toHaveLength(1);
+    expect(uploads[0].id).toBe('only');
   });
 
   it('reports partial failures in `failed` and still returns the successes', async () => {
     const fetchMock = vi
       .fn()
-      .mockResolvedValueOnce(okResponse('okimg'))
+      .mockResolvedValueOnce(directUploadOk('okimg'))
       .mockRejectedValueOnce(new Error('boom'));
     vi.stubGlobal('fetch', fetchMock);
 
-    const { images, failed } = await svcWith(enabledClient()).uploadMany(
-      [file('good.jpg'), file('bad.jpg')],
-      { userId: 'u1' },
-    );
-    expect(images).toHaveLength(1);
-    expect(images[0].filename).toBe('good.jpg');
-    expect(failed).toEqual([{ filename: 'bad.jpg', error: 'upload_failed' }]);
-  });
-
-  it('503s (with a failed list) when every upload fails', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('down')));
-    await expect(svcWith(enabledClient()).uploadMany([file()], { userId: 'u1' })).rejects.toMatchObject({
-      statusCode: 503,
+    const { uploads, failed } = await svcWith(enabledClient()).createDirectUploads({
+      count: 2,
+      userId: 'u1',
     });
+    expect(uploads).toHaveLength(1);
+    expect(uploads[0].id).toBe('okimg');
+    expect(failed).toEqual([{ index: 1, error: 'direct_upload_failed' }]);
   });
 
-  it('validates empty / too-many / bad-mime / oversized before uploading', async () => {
+  it('503s (with a failed list) when every mint fails', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('down')));
+    await expect(
+      svcWith(enabledClient()).createDirectUploads({ count: 1, userId: 'u1' }),
+    ).rejects.toMatchObject({ statusCode: 503 });
+  });
+
+  it('validates count (positive integer, at most MAX_ATTACHMENTS) before calling Cloudflare', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
     const svc = svcWith(enabledClient());
-    await expect(svc.uploadMany([], { userId: 'u1' })).rejects.toMatchObject({ statusCode: 400 });
-    await expect(
-      svc.uploadMany(Array.from({ length: 6 }, () => file()), { userId: 'u1' }),
-    ).rejects.toMatchObject({ statusCode: 400 });
-    await expect(
-      svc.uploadMany([file('a.pdf', 'application/pdf')], { userId: 'u1' }),
-    ).rejects.toMatchObject({ statusCode: 400 });
-    await expect(
-      svc.uploadMany([file('big.jpg', 'image/jpeg', 11 * 1024 * 1024)], { userId: 'u1' }),
-    ).rejects.toMatchObject({ statusCode: 400 });
+    await expect(svc.createDirectUploads({ count: 0, userId: 'u1' })).rejects.toMatchObject({
+      statusCode: 400,
+    });
+    await expect(svc.createDirectUploads({ count: 6, userId: 'u1' })).rejects.toMatchObject({
+      statusCode: 400,
+    });
+    await expect(svc.createDirectUploads({ count: 1.5, userId: 'u1' })).rejects.toMatchObject({
+      statusCode: 400,
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
 

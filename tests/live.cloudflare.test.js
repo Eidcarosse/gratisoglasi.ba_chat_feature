@@ -1,8 +1,10 @@
 /**
  * LIVE end-to-end test against the REAL Cloudflare Images API. OPT-IN only — runs when
- * RUN_LIVE_CF=1. It uploads real test images through the full HTTP stack (route → multer →
- * controller → service → CloudflareImagesClient → Cloudflare), verifies they are publicly
- * viewable, then SURGICALLY deletes exactly the ids it created and confirms they are gone.
+ * RUN_LIVE_CF=1. It exercises the full Direct Creator Upload flow exactly as a client would:
+ *   1) POST /uploads/direct-upload on OUR server → one-time { id, uploadURL } (no bytes touch us)
+ *   2) POST the image bytes DIRECTLY to Cloudflare's uploadURL (multipart field `file`)
+ *   3) read back the delivery URL from Cloudflare's response and verify it is publicly viewable
+ * then SURGICALLY deletes exactly the ids it created and confirms they are gone.
  *
  * SAFETY: the Cloudflare account may be shared with the main site's listing images, so this test
  * only ever deletes the specific ids it just created — never a list/bulk delete.
@@ -19,7 +21,6 @@ dotenv.config({ path: path.resolve(path.dirname(fileURLToPath(import.meta.url)),
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import request from 'supertest';
-import { randomUUID } from 'node:crypto';
 import { bootTestApp } from './helpers/app.js';
 
 const RUN = process.env.RUN_LIVE_CF === '1';
@@ -56,7 +57,16 @@ async function fetchOk(url, tries = 4) {
   return res;
 }
 
-describe.skipIf(!RUN)('LIVE: POST /uploads/images → Cloudflare (real)', () => {
+/** Upload bytes DIRECTLY to a Cloudflare one-time uploadURL (what the client does). */
+async function uploadToCloudflare(uploadURL, bytes, filename) {
+  const form = new FormData();
+  form.append('file', new Blob([bytes], { type: 'image/png' }), filename);
+  const res = await fetch(uploadURL, { method: 'POST', body: form });
+  const json = await res.json().catch(() => ({}));
+  return { ok: res.ok && json?.success, result: json?.result };
+}
+
+describe.skipIf(!RUN)('LIVE: direct-upload → client → Cloudflare (real)', () => {
   let ctx;
   let app;
   const token = '0123456789abcdef01234567'; // dev-mode auth: token === userId
@@ -75,38 +85,42 @@ describe.skipIf(!RUN)('LIVE: POST /uploads/images → Cloudflare (real)', () => 
       const stillThere = await cfExists(id);
       results.push({ id, deleted, stillThere });
     }
-    // eslint-disable-next-line no-console
     console.log('[live-cf] created ids:', createdIds, '\n[live-cf] cleanup:', JSON.stringify(results));
     for (const r of results) expect(r.stillThere).toBe(false);
     if (ctx) await ctx.shutdown();
   });
 
   it(
-    'uploads 2 real images and returns publicly viewable delivery URLs',
+    'mints 2 one-time URLs, uploads directly to Cloudflare, and gets publicly viewable delivery URLs',
     async () => {
-      const mkfile = () => [
-        PNG_1x1,
-        { filename: `chat-e2e-${randomUUID()}.png`, contentType: 'image/png' },
-      ];
-      const res = await request(app)
-        .post('/uploads/images')
+      // 1) Our server mints one-time upload URLs — NO bytes sent to us.
+      const mint = await request(app)
+        .post('/uploads/direct-upload')
         .set({ Authorization: `Bearer ${token}` })
-        .attach('images', ...mkfile())
-        .attach('images', ...mkfile());
+        .send({ count: 2 });
 
-      // Capture ids IMMEDIATELY so afterAll cleans up even if an assertion below throws.
-      if (res.body?.images) createdIds.push(...res.body.images.map((i) => i.id));
+      expect(mint.status).toBe(200);
+      expect(mint.body.uploads).toHaveLength(2);
+      expect(mint.body.failed).toEqual([]);
+      expect(mint.body.expiresInSeconds).toBeGreaterThan(0);
 
-      expect(res.status).toBe(200);
-      expect(res.body.images).toHaveLength(2);
-      expect(res.body.failed).toEqual([]);
-      expect(res.body.imageUrls).toHaveLength(2);
+      // Capture ids IMMEDIATELY so afterAll cleans up even if an assertion below throws. The id CF
+      // assigns at direct_upload time is the id the image will have once uploaded.
+      createdIds.push(...mint.body.uploads.map((u) => u.id));
 
-      for (const img of res.body.images) {
-        expect(img.url).toMatch(/^https:\/\/imagedelivery\.net\/.+\/.+/);
-        expect(img.key).toBe(img.id);
-        const view = await fetchOk(img.url);
-        expect(view.status).toBe(200); // unsigned delivery URL is publicly viewable
+      // 2) Client uploads bytes DIRECTLY to each one-time URL.
+      for (const upload of mint.body.uploads) {
+        expect(upload.uploadURL).toMatch(/^https:\/\/upload\.imagedelivery\.net\/.+/);
+
+        const up = await uploadToCloudflare(upload.uploadURL, PNG_1x1, `chat-e2e-${upload.id}.png`);
+        expect(up.ok).toBe(true);
+        expect(up.result.id).toBe(upload.id); // CF confirms the pre-assigned id
+
+        // 3) The delivery URL from CF's response is publicly viewable (unsigned).
+        const deliveryUrl = (up.result.variants || []).find((v) => v.endsWith('/public')) ?? up.result.variants?.[0];
+        expect(deliveryUrl).toMatch(/^https:\/\/imagedelivery\.net\/.+\/.+/);
+        const view = await fetchOk(deliveryUrl);
+        expect(view.status).toBe(200);
       }
     },
     90_000,

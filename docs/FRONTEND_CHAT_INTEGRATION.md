@@ -178,8 +178,8 @@ type MessageType = 'text' | 'image' | 'file';
 type MessageStatus = 'sent'; // always 'sent' (see §3.3)
 
 interface Attachment {
-  key: string; // Cloudflare image id returned by POST /uploads/images (as `key`)
-  url: string; // public delivery URL of the uploaded image (valid URL)
+  key: string; // Cloudflare image id (the `id` from POST /uploads/direct-upload)
+  url: string; // public delivery URL of the uploaded image, from Cloudflare's upload response
   mime: string; // e.g. "image/png"
   size: number; // bytes, integer >= 0
   width?: number; // integer > 0 (images)
@@ -456,70 +456,105 @@ when the socket is unavailable.
 
 > Sending a duplicate `clientMessageId` is **not** an error — you get the original message back.
 
-### 5.6 `POST /uploads/images` — upload images (server-proxied to Cloudflare)
+### 5.6 `POST /uploads/direct-upload` — get one-time Cloudflare upload URLs (Direct Creator Upload)
 
-Upload **1–5 images in a single `multipart/form-data` request**. The chat server forwards each
-file to Cloudflare Images and returns the delivery URLs. Works the same for web and mobile.
+Images are uploaded **directly from the client to Cloudflare** — **no bytes pass through the chat
+server**. You ask this endpoint for one or more **one-time upload URLs**, then `POST` each image
+straight to Cloudflare. This is the same shape as a classic presigned-URL flow. Works identically
+on web and mobile.
 
-- **Auth:** required.
-- **Content-Type:** `multipart/form-data`.
-- **Form field:** `images` — repeatable (send the field once per file). The singular `image` is
-  also accepted for compatibility.
+> **Why this changed.** The old `POST /uploads/images` proxied every image through the chat server
+> (buffered in RAM, re-streamed to Cloudflare) on the same process that serves realtime chat, which
+> caused latency spikes and restarts under load. That endpoint is **removed**; use this one.
 
-| Rule                  | Value                                                |
-| --------------------- | ---------------------------------------------------- |
-| Max files per request | **5**                                                |
-| Max size per file     | **10 MB**                                            |
-| Allowed mime types    | `image/jpeg`, `image/png`, `image/webp`, `image/gif` |
+- **Auth:** required. **Rate-limited: 20 / 60 s** (per request, not per image).
+- **Content-Type:** `application/json`.
+- **Request body:**
 
-- **200 response** (partial success — see below):
+```json
+{ "count": 2 }
+```
+
+| Field   | Type    | Rules                                                                    |
+| ------- | ------- | ------------------------------------------------------------------------ |
+| `count` | integer | Optional. How many upload URLs to mint. **1–5. Default `1`.**            |
+
+- **200 response:**
 
 ```json
 {
-  "images": [
+  "uploads": [
     {
-      "id": "cf-image-id",
-      "key": "cf-image-id",
-      "url": "https://imagedelivery.net/<hash>/cf-image-id/public",
-      "mime": "image/jpeg",
-      "size": 184320,
-      "filename": "photo.jpg"
+      "id": "cf-image-id-1",
+      "uploadURL": "https://upload.imagedelivery.net/<hash>/<one-time-token>"
+    },
+    {
+      "id": "cf-image-id-2",
+      "uploadURL": "https://upload.imagedelivery.net/<hash>/<one-time-token>"
     }
   ],
-  "failed": [{ "filename": "broken.png", "error": "upload_failed" }],
-  "imageUrls": ["https://imagedelivery.net/<hash>/cf-image-id/public"]
+  "failed": [],
+  "expiresInSeconds": 1800
 }
 ```
 
-| Field       | Meaning                                                                                |
-| ----------- | -------------------------------------------------------------------------------------- |
-| `images`    | Successfully uploaded images. Each object is **attachment-ready** — see mapping below. |
-| `failed`    | Files that failed to upload (e.g. a transient Cloudflare error). Retry just these.     |
-| `imageUrls` | Flat list of the succeeded delivery URLs (convenience).                                |
+| Field              | Meaning                                                                                        |
+| ------------------ | ---------------------------------------------------------------------------------------------- |
+| `uploads`          | One entry per requested URL. `uploadURL` is **one-time & single-use**; `id` is the image's id. |
+| `failed`           | URLs that could not be minted (transient Cloudflare error): `{ index, error }`. Retry those.   |
+| `expiresInSeconds` | How long each `uploadURL` stays valid. Request fresh URLs if the user is slow / it expires.    |
 
-- **Partial failures:** if some files upload and others fail, you still get **200** with the
-  succeeded files in `images` and the rest in `failed` — retry only the `failed` ones. If **every**
-  file fails, the request returns **503 UNAVAILABLE**.
-- **Error cases:** uploads not configured on the server → `503 UNAVAILABLE`; no files / more than 5
-  / non-image mime / file over 10 MB → `400 VALIDATION`; missing token → `401`; over rate limit →
-  `429`.
+- **Partial failures:** if some URLs mint and others fail you still get **200**, with the failures
+  in `failed` (retry just those). If **every** mint fails, the request returns **503 UNAVAILABLE**.
+- **Error cases:** uploads not configured on the server → `503 UNAVAILABLE`; `count` missing-ok but
+  `< 1`, `> 5`, or non-integer → `400 VALIDATION`; missing token → `401`; over rate limit → `429`.
 
-**Mapping a returned image onto a message attachment** — each `images[i]` maps directly:
+**Step 2 — upload each file directly to Cloudflare.** For each `uploads[i]`, `POST` the image as
+`multipart/form-data` with the field name **`file`** to `uploads[i].uploadURL`:
 
-| `attachment` field | from `images[i]`                                                        |
-| ------------------ | ----------------------------------------------------------------------- |
-| `key`              | `key` (the Cloudflare image id — enables server-side cleanup on unsend) |
-| `url`              | `url`                                                                   |
-| `mime`             | `mime`                                                                  |
-| `size`             | `size`                                                                  |
-| `width` / `height` | omit — the server can't know them; supply them yourself if you do       |
+```js
+const form = new FormData();
+form.append('file', { uri, name, type }); // RN: { uri, name, type } ; web: a File/Blob
+const res = await fetch(uploads[i].uploadURL, { method: 'POST', body: form });
+const { result } = await res.json(); // Cloudflare's response
+// result.id === uploads[i].id ; result.variants = delivery URLs
+const url = result.variants.find((v) => v.endsWith('/public')) ?? result.variants[0];
+```
 
-**Attachment upload flow:**
+Cloudflare returns **200 with the image `result`** (including `variants`, the delivery URLs) once
+it has accepted and processed the image — so when this call succeeds, the image is ready to attach.
+**Do not** send `Authorization` to `uploadURL`; the one-time token in the URL authorizes it.
 
-1. `POST /uploads/images` with your files under the `images` field → `{ images, failed, imageUrls }`.
-2. Retry any `failed` entries if needed.
+| Rule                  | Value / who enforces it                                                                   |
+| --------------------- | ----------------------------------------------------------------------------------------- |
+| Max URLs per request  | **5** — enforced by this endpoint (`count`).                                              |
+| Max size per file     | Enforced by **Cloudflare** (rejects oversized uploads). Pre-check client-side for UX.     |
+| Allowed formats       | Enforced by **Cloudflare** (rejects non-images). Pre-check client-side for UX.            |
+
+**Mapping onto a message attachment** — after the Cloudflare upload succeeds:
+
+| `attachment` field | value                                                                     |
+| ------------------ | ------------------------------------------------------------------------- |
+| `key`              | `uploads[i].id` (the Cloudflare image id — enables cleanup on unsend)     |
+| `url`              | the delivery URL you picked from `result.variants`                        |
+| `mime`             | the file's mime (you know it client-side)                                 |
+| `size`             | the file's size in bytes (you know it client-side)                        |
+| `width` / `height` | optional — supply if you have them                                        |
+
+**Full attachment flow:**
+
+1. `POST /uploads/direct-upload { count: N }` → `{ uploads, failed, expiresInSeconds }`.
+2. For each `uploads[i]`: `POST` the file (field `file`) directly to `uploads[i].uploadURL`; read
+   the delivery URL from Cloudflare's `result.variants`. Retry `failed` mints / expired URLs by
+   requesting fresh ones.
 3. Send `message:send` (or REST send) with `type: "image"` and
-   `attachments: images.map(i => ({ key: i.key, url: i.url, mime: i.mime, size: i.size }))`.
+   `attachments: [{ key: uploads[i].id, url, mime, size }, ...]`. **Attaching is a separate step** —
+   a message is created only after you've confirmed the upload(s) succeeded.
+
+> **Consistency notes.** The upload and the "attach to message" step are intentionally decoupled.
+> (a) If you upload but never attach, the orphaned Cloudflare image is harmless and can be cleaned
+> up later; unused one-time URLs simply expire. (b) Only attach an image after its Cloudflare upload
+> returned success — that response is your confirmation the image is usable.
 
 ### 5.7 `DELETE /conversations/:conversationId` — delete conversation (for me)
 
@@ -874,7 +909,7 @@ messages.
 
 | `code`            | HTTP | When                                                                                                          |
 | ----------------- | ---- | ------------------------------------------------------------------------------------------------------------- |
-| `VALIDATION`      | 400  | Bad/missing field, bad ObjectId/UUID, body too long, text with empty body, unsupported mime/oversized upload. |
+| `VALIDATION`      | 400  | Bad/missing field, bad ObjectId/UUID, body too long, text with empty body, bad upload `count`. |
 | `UNAUTHENTICATED` | 401  | Missing/invalid token.                                                                                        |
 | `FORBIDDEN`       | 403  | Not a participant of the conversation; item unavailable on create.                                            |
 | `NOT_FOUND`       | 404  | Unknown conversation/item/route.                                                                              |
@@ -935,7 +970,7 @@ message` index for optimistic reconcile and dedupe of `message:new` echoes.
 | GET    | `/conversations/:id/messages`            | ✅          | `?before&limit(1-100,def 50)`                                        | `200 { messages }` newest-first                                                   |
 | POST   | `/conversations/:id/messages`            | ✅ (30/10s) | `{ clientMessageId, type, body?, attachments? }`                     | `201 { message }`                                                                 |
 | DELETE | `/conversations/:id/messages/:messageId` | ✅          | —                                                                    | `200 { ok, messageId }` — unsend for everyone (sender-only)                       |
-| POST   | `/uploads/images`                        | ✅ (20/60s) | `multipart/form-data` — field `images` (1–5 files, ≤10 MB, image/\*) | `200 { images, failed, imageUrls }`                                               |
+| POST   | `/uploads/direct-upload`                 | ✅ (20/60s) | `{ count? }` (1–5, default 1)                                        | `200 { uploads:[{id,uploadURL}], failed, expiresInSeconds }` — then upload bytes DIRECT to Cloudflare |
 | POST   | `/devices`                               | ✅          | `{ token, platform }`                                                | `201 { ok }` — register Expo push token                                           |
 | DELETE | `/devices`                               | ✅          | `{ token }`                                                          | `200 { ok }` — unregister on logout                                               |
 | GET    | `/healthz` `/readyz` `/metrics`          | —           | —                                                                    | health/metrics                                                                    |
@@ -963,7 +998,8 @@ message` index for optimistic reconcile and dedupe of `message:new` echoes.
 - `type`: `text | image | file`. `limit`: int 1–100 (default 50).
 - `attachment`: `{ key:str, url:URL, mime:str, size:int≥0, width?:int>0, height?:int>0 }`.
 - `attachments`: **at most 5** per message; `image`/`file` messages require **≥1** attachment.
-- Upload (`POST /uploads/images`): multipart field `images`; ≤5 files; each ≤10 MB; mime ∈ {jpeg,png,webp,gif}.
+- Upload (`POST /uploads/direct-upload`): `{ count? }` 1–5 (default 1) → one-time `uploadURL`s; then
+  POST each file (field `file`) DIRECT to Cloudflare. Size/format enforced by Cloudflare.
 - `platform` (devices): `ios | android | web`. `token`: an `ExponentPushToken[...]`.
 
 ### 10.4 Server config knobs that affect the client
