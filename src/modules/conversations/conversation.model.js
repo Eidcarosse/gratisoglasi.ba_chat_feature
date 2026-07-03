@@ -13,6 +13,8 @@
  *   unreadCounts    -> { <userId>: int } for O(1) badges
  *   readState       -> { <userId>: { lastReadMessageId, lastReadAt } }
  *   deletedFor      -> [userId] who "deleted for me" (hidden from their inbox; cleared on new msg)
+ *   clearedAt       -> { <userId>: messageId } history watermark set on delete; reads return only
+ *                      messages after it (pre-delete messages stay hidden even after resurface)
  *   mutedBy         -> [userId] who muted push for this convo (unread still increments)
  *   expiresAt       -> createdAt + CHAT_TTL_DAYS; TTL index auto-deletes the convo (+messages)
  *
@@ -74,6 +76,11 @@ const conversationSchema = new mongoose.Schema(
     // Per-participant "delete for me": userIds here have hidden the convo from their inbox. A new
     // message clears this (resurfaces the thread). Stored as ObjectIds (matches participantIds).
     deletedFor: { type: [mongoose.Schema.Types.ObjectId], default: [] },
+    // Per-participant history watermark: { <userId>: <message _id> } captured when that user
+    // "deleted for me". Their message reads return only messages with _id > this, so pre-delete
+    // messages stay hidden even after the thread resurfaces. DISTINCT from deletedFor (which the
+    // resurface $pull clears) so the watermark is durable. Keyed by userId string; Mixed = dynamic keys.
+    clearedAt: { type: mongoose.Schema.Types.Mixed, default: {} },
     // Per-participant mute: userIds here receive no PUSH for new messages (unread still counts).
     mutedBy: { type: [mongoose.Schema.Types.ObjectId], default: [] },
     // TTL: set once at creation = createdAt + CHAT_TTL_DAYS. Messages carry the same instant so

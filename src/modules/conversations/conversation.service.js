@@ -117,10 +117,16 @@ export class ConversationService {
     return this.repo.setLastMessage(oid(conversationId), lastMessage);
   }
 
-  /** "Delete for me": hide the conversation from the caller's inbox (membership-guarded). */
+  /**
+   * "Delete for me": hide the conversation from the caller's inbox AND clear their message history
+   * up to the current newest message (membership-guarded). The watermark is the current
+   * `lastMessage.messageId` (null on an empty thread); the caller's reads then return only messages
+   * after it, so pre-delete messages stay hidden even after the thread resurfaces on a new message.
+   */
   async hideForUser(conversationId, userId) {
-    await this.#getMemberConvo(conversationId, userId);
-    return this.repo.hideForUser(oid(conversationId), oid(userId));
+    const convo = await this.#getMemberConvo(conversationId, userId);
+    const clearedMessageId = convo.lastMessage?.messageId ?? null;
+    return this.repo.hideForUser(oid(conversationId), oid(userId), clearedMessageId);
   }
 
   /** Mute/unmute push for the caller on this conversation (membership-guarded). */

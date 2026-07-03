@@ -10,7 +10,7 @@
  */
 import mongoose from 'mongoose';
 import { EVENTS } from '../../realtime/events.js';
-import { messagesSent } from '../../common/metrics.js';
+import { messagesSent, pushRecipientOnline } from '../../common/metrics.js';
 import { LIMITS } from '../../config/constants.js';
 import { AppError } from '../../common/errors/AppError.js';
 
@@ -76,7 +76,12 @@ export class MessageService {
       for (const rid of recipientIds) {
         if (mutedSet.has(rid)) continue; // muted → no push (unread still incremented above)
         const online = this.presence ? await this.presence.isOnline(rid) : false;
-        if (!online)
+        if (online) {
+          // Counted as online (note: a backgrounded app with a still-connected socket also counts
+          // here) → no push. A high ratio of this vs. chat_push_sent_total is the signal that push
+          // isn't firing because recipients look online.
+          pushRecipientOnline.inc();
+        } else {
           await this.notifications.notify({
             type: 'message',
             userId: rid,
@@ -85,6 +90,7 @@ export class MessageService {
             senderName,
             itemTitle,
           });
+        }
       }
     }
 
@@ -92,14 +98,17 @@ export class MessageService {
   }
 
   async history(conversationId, userId, { before, limit } = {}) {
-    await this.conversations.getMemberConversation(conversationId, userId);
-    return this.repo.findByConversation(oid(conversationId), { before, limit });
+    const convo = await this.conversations.getMemberConversation(conversationId, userId);
+    // Honor the caller's "delete for me" watermark: never return messages at/before it.
+    const clearAfter = convo.clearedAt?.[String(userId)] ?? undefined;
+    return this.repo.findByConversation(oid(conversationId), { before, limit, clearAfter });
   }
 
   /** Reconnect-sync: messages newer than the client's last-held id (oldest-first). */
   async syncSince(conversationId, userId, afterId, { limit } = {}) {
-    await this.conversations.getMemberConversation(conversationId, userId);
-    return this.repo.findByConversation(oid(conversationId), { after: afterId, limit });
+    const convo = await this.conversations.getMemberConversation(conversationId, userId);
+    const clearAfter = convo.clearedAt?.[String(userId)] ?? undefined;
+    return this.repo.findByConversation(oid(conversationId), { after: afterId, limit, clearAfter });
   }
 
   /**

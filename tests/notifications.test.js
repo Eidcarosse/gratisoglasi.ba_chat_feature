@@ -23,7 +23,20 @@ beforeAll(async () => {
   ctx.container.notificationService.push = {
     send: async (messages) => {
       lastMessages = messages;
-      return { tickets: [], invalidTokens: returnInvalid ? messages.map((m) => m.to) : [] };
+      if (returnInvalid) {
+        return {
+          tickets: messages.map(() => ({ status: 'error', details: { error: 'DeviceNotRegistered' } })),
+          unregisteredTokens: messages.map((m) => m.to), // Expo says the device is gone → prune
+          unsupportedTokens: [],
+          errorCount: messages.length,
+        };
+      }
+      return {
+        tickets: messages.map(() => ({ status: 'ok' })),
+        unregisteredTokens: [],
+        unsupportedTokens: [],
+        errorCount: 0,
+      };
     },
   };
   buyerId = await seedUser(ctx, { firstname: 'B', lastname: 'Uyer', email: 'b@e.com' });

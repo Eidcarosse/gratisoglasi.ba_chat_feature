@@ -42,6 +42,30 @@ export const presenceLastSeenEntries = new client.Gauge({
   registers: [registry],
 });
 
+// Push-notification outcomes — the offline-recipient path is fire-and-forget and easy to lose
+// visibility on. Watch these to see WHY a push didn't arrive: no device registered, recipient
+// counted as online (e.g. a backgrounded-but-connected socket), a provider failure, or success.
+export const pushSent = new client.Counter({
+  name: 'chat_push_sent_total',
+  help: 'Push notifications successfully handed to the provider (Expo tickets returned)',
+  registers: [registry],
+});
+export const pushFailed = new client.Counter({
+  name: 'chat_push_failed_total',
+  help: 'Push attempts that errored (provider/network) and were dropped',
+  registers: [registry],
+});
+export const pushNoDevice = new client.Counter({
+  name: 'chat_push_no_device_total',
+  help: 'Offline recipients with no registered device (nothing to push to)',
+  registers: [registry],
+});
+export const pushRecipientOnline = new client.Counter({
+  name: 'chat_push_recipient_online_total',
+  help: 'New-message recipients skipped for push because they were counted as online',
+  registers: [registry],
+});
+
 /** Express handler for GET /metrics. */
 export async function metricsHandler(_req, res) {
   res.set('Content-Type', registry.contentType);

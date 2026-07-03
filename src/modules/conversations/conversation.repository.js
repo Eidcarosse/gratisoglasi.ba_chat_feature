@@ -75,11 +75,22 @@ export class ConversationRepository {
     ).lean();
   }
 
-  /** "Delete for me": hide the convo from this user's inbox and clear their unread badge. */
-  async hideForUser(conversationId, userId) {
+  /**
+   * "Delete for me": hide the convo from this user's inbox, clear their unread badge, and stamp a
+   * history watermark (`clearedAt.<userId>` = newest message id at delete time) so their message
+   * reads return only messages AFTER it. `clearedMessageId` may be null (empty thread → nothing to
+   * hide). The watermark lives outside `deletedFor`, so the resurface `$pull` never clears it.
+   */
+  async hideForUser(conversationId, userId, clearedMessageId = null) {
     return ConversationModel.findByIdAndUpdate(
       conversationId,
-      { $addToSet: { deletedFor: userId }, $set: { [`unreadCounts.${String(userId)}`]: 0 } },
+      {
+        $addToSet: { deletedFor: userId },
+        $set: {
+          [`unreadCounts.${String(userId)}`]: 0,
+          [`clearedAt.${String(userId)}`]: clearedMessageId,
+        },
+      },
       { new: true },
     ).lean();
   }
