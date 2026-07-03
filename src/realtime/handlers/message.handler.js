@@ -13,6 +13,7 @@ import { convRoom } from '../rooms.js';
 import { validatePayload } from '../../common/middleware/validate.js';
 import { ackLatency } from '../../common/metrics.js';
 import { AppError } from '../../common/errors/AppError.js';
+import { LIMITS } from '../../config/constants.js';
 import {
   z,
   objectIdString,
@@ -25,7 +26,13 @@ const sendSchema = refineSend(z.object({ conversationId: objectIdString, ...send
 
 const deliveredSchema = z.object({ conversationId: objectIdString, messageId: objectIdString });
 const readSchema = z.object({ conversationId: objectIdString, upToMessageId: objectId.optional() });
-const syncSchema = z.object({ cursors: z.record(objectIdString, objectIdString) });
+const syncSchema = z.object({
+  cursors: z
+    .record(objectIdString, objectIdString)
+    .refine((c) => Object.keys(c).length <= LIMITS.MAX_SYNC_CONVERSATIONS, {
+      message: `At most ${LIMITS.MAX_SYNC_CONVERSATIONS} conversations per sync`,
+    }),
+});
 
 function ackErr(err) {
   if (err instanceof AppError) return { ok: false, error: err.toJSON() };
@@ -97,11 +104,14 @@ export function registerMessageHandlers(socket, container) {
   socket.on(EVENTS.CONVERSATION_SYNC, async (payload, ack) => {
     try {
       const data = validatePayload(syncSchema, payload);
-      const missed = [];
-      for (const [conversationId, cursor] of Object.entries(data.cursors)) {
-        const msgs = await messageService.syncSince(conversationId, userId, cursor);
-        missed.push(...msgs);
-      }
+      // Fan the per-conversation fetches out concurrently (bounded by MAX_SYNC_CONVERSATIONS)
+      // instead of a sequential round-trip per conversation.
+      const perConversation = await Promise.all(
+        Object.entries(data.cursors).map(([conversationId, cursor]) =>
+          messageService.syncSince(conversationId, userId, cursor),
+        ),
+      );
+      const missed = perConversation.flat();
       if (typeof ack === 'function') ack({ ok: true, missed });
     } catch (err) {
       if (typeof ack === 'function') ack(ackErr(err));

@@ -31,6 +31,9 @@ export const LIMITS = Object.freeze({
   MAX_PAGE_SIZE: 100,
   // At most 5 attachments (images/files) per message. Enforced in the send schemas (REST + ws).
   MAX_ATTACHMENTS: 5,
+  // At most this many conversations per conversation:sync request — caps the fan-out of DB
+  // queries a single reconnect can trigger.
+  MAX_SYNC_CONVERSATIONS: 50,
   // Conversations and their messages auto-delete this many days AFTER the conversation's
   // creation (fixed window, not rolling) via a MongoDB TTL index on `expiresAt`.
   CHAT_TTL_DAYS: 7,

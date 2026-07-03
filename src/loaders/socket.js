@@ -17,6 +17,11 @@ export function attachSocket(httpServer, container) {
   const io = new Server(httpServer, {
     transports: [...SOCKET_TRANSPORTS],
     cors: { origin: allowAll ? true : config.CORS_ORIGINS, credentials: !allowAll },
+    // Defense-in-depth cap on inbound event payload size. Events are small JSON (image BYTES go
+    // straight to Cloudflare, never through here), so 100 KB is generous and mirrors the
+    // express.json({ limit: '256kb' }) on the REST side — a malformed/oversized frame can't pin
+    // memory. Default is 1 MB.
+    maxHttpBufferSize: 1e5,
   });
 
   // Handshake auth — verifies once and stamps socket.userId. Downstream handlers trust ONLY

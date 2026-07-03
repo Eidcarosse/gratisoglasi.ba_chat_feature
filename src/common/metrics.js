@@ -28,6 +28,20 @@ export const ackLatency = new client.Histogram({
   registers: [registry],
 });
 
+// In-memory Map sizes — watch these stay flat (not monotonically climbing) to confirm the
+// rate-limiter and presence stores are bounded and not leaking over the process lifetime.
+export const rateLimitBuckets = new client.Gauge({
+  name: 'chat_rate_limit_buckets',
+  help: 'Current number of live fixed-window rate-limit buckets in memory',
+  registers: [registry],
+});
+
+export const presenceLastSeenEntries = new client.Gauge({
+  name: 'chat_presence_last_seen_entries',
+  help: 'Current number of retained lastSeen entries in the presence store',
+  registers: [registry],
+});
+
 /** Express handler for GET /metrics. */
 export async function metricsHandler(_req, res) {
   res.set('Content-Type', registry.contentType);
