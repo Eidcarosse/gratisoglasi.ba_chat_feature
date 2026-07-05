@@ -77,6 +77,10 @@ describe('push notifications', () => {
     expect(lastMessages[0].title).toBe('B Uyer'); // sender displayName
     expect(lastMessages[0].body).toBe('Hello there');
     expect(lastMessages[0].data.conversationId).toBe(convoId);
+    // Delivery-reliability fields: high priority wakes doze-mode Android; channelId targets the
+    // client's high-importance channel (default 'default'). Missing before → dropped on some devices.
+    expect(lastMessages[0].priority).toBe('high');
+    expect(lastMessages[0].channelId).toBe('default');
   });
 
   it('previews image messages as a photo label', async () => {

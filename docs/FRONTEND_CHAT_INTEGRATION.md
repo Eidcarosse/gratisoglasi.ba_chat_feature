@@ -1010,6 +1010,7 @@ message` index for optimistic reconcile and dedupe of `message:new` echoes.
 | `CORS_ORIGINS`      | `*`     | Must include your web origin (RN native is unaffected; Expo web isn't). `credentials: true`. |
 | `AUTH_MODE`         | `dev`   | `dev` → token = userId; `jwt` → token = signed JWT (same wiring).                            |
 | `EXPO_ACCESS_TOKEN` | —       | Server-side only; push works without it. No client impact.                                   |
+| `EXPO_ANDROID_CHANNEL_ID` | `default` | The Android channel the server targets — the client's `setNotificationChannelAsync` id **must** match it (§10.5). |
 
 ### 10.5 Push notifications, delete & mute (behavior)
 
@@ -1019,8 +1020,41 @@ message` index for optimistic reconcile and dedupe of `message:new` echoes.
 recipient **only when they have no active socket** (are offline) **and** have not muted the
 conversation. Payload: `title` = sender's display name, `body` = the text (truncated) or
 `📷 Photo` / `📎 File`, `data = { type, conversationId, messageId?, itemTitle? }` — use `data`
-to deep-link into the conversation (and, via `conversation.itemId`, the ad). Tokens Expo reports
-as `DeviceNotRegistered` are pruned server-side; re-register on each app start.
+to deep-link into the conversation (and, via `conversation.itemId`, the ad). The server also sends
+`priority: "high"` and `channelId` (see below). Tokens Expo reports as `DeviceNotRegistered` are
+pruned server-side; re-register on each app start.
+
+**⚠️ Required client setup (or Android delivery is unreliable).** The token is only half of it —
+the app **must** also do the standard Expo setup below, or notifications will arrive on some
+Android devices and silently not on others (while the Expo push test tool still works). Per
+`docs.expo.dev/push-notifications/push-notifications-setup`:
+
+1. **Permission + token.** Request notification permission, then get the token with the EAS
+   `projectId`: `Notifications.getExpoPushTokenAsync({ projectId })`. POST that token to `/devices`.
+2. **Notification handler** (so foreground notifications display):
+   ```js
+   Notifications.setNotificationHandler({
+     handleNotification: async () => ({
+       shouldShowBanner: true, shouldShowList: true,
+       shouldPlaySound: true, shouldSetBadge: true,
+     }),
+   });
+   ```
+3. **Android channel — the id MUST equal the server's `EXPO_ANDROID_CHANNEL_ID` (default
+   `"default"`).** Android 8+ drops or silences any notification whose `channelId` has no matching
+   high-importance channel:
+   ```js
+   if (Platform.OS === 'android') {
+     await Notifications.setNotificationChannelAsync('default', {
+       importance: Notifications.AndroidImportance.HIGH,
+       sound: 'default',
+     });
+   }
+   ```
+4. **EAS credentials (build-time, not code).** Android requires **FCM V1** credentials uploaded to
+   EAS and `android.googleServicesFile` pointing at a `google-services.json` whose package name
+   matches the built app. A missing/mismatched FCM setup is a classic "only the test tool delivers"
+   cause. iOS needs an APNs key on the Apple Developer account.
 
 **Unsend (delete message for everyone).** `DELETE /conversations/:id/messages/:messageId`
 (sender-only; 403 otherwise). The message is tombstoned — it stays in history with

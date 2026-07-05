@@ -29,7 +29,8 @@ export class ExpoPushProvider {
 
   /**
    * @param {Array<{ to: string, title?: string, body?: string, data?: object, sound?: string }>} messages
-   * @returns {Promise<{ tickets: object[], unregisteredTokens: string[], unsupportedTokens: string[], errorCount: number }>}
+   * @returns {Promise<{ tickets: object[], receiptIdTokens: Record<string, string>, unregisteredTokens: string[], unsupportedTokens: string[], errorCount: number }>}
+   *   - receiptIdTokens: map of accepted ticket id → token, for a later getReceipts() delivery check.
    *   - unregisteredTokens: Expo reported DeviceNotRegistered → safe to PRUNE (the device is gone).
    *   - unsupportedTokens:  not a valid Expo push token → do NOT prune here (surfaced/blocked at
    *                         registration); logged loudly so a misconfigured client is visible.
@@ -49,6 +50,7 @@ export class ExpoPushProvider {
     }
 
     const tickets = [];
+    const receiptIdTokens = {};
     const unregisteredTokens = [];
     let errorCount = 0;
     const chunks = this.expo.chunkPushNotifications(valid);
@@ -58,7 +60,10 @@ export class ExpoPushProvider {
         // Tickets come back in the chunk's message order.
         receipts.forEach((ticket, i) => {
           tickets.push(ticket);
-          if (ticket.status === 'error') {
+          if (ticket.status === 'ok') {
+            // Remember which token this ticket belongs to so a later receipt check can prune it.
+            if (ticket.id) receiptIdTokens[ticket.id] = chunk[i].to;
+          } else if (ticket.status === 'error') {
             errorCount += 1;
             const code = ticket.details?.error;
             if (code === 'DeviceNotRegistered') unregisteredTokens.push(chunk[i].to);
@@ -73,7 +78,43 @@ export class ExpoPushProvider {
       }
     }
 
-    return { tickets, unregisteredTokens, unsupportedTokens, errorCount };
+    return { tickets, receiptIdTokens, unregisteredTokens, unsupportedTokens, errorCount };
+  }
+
+  /**
+   * Fetch delivery receipts for previously-issued ticket ids. A ticket `status: 'ok'` only means
+   * Expo ACCEPTED the push — the receipt is what confirms FCM/APNs actually delivered it, and it's
+   * where FCM-credential failures (MismatchSenderId, InvalidCredentials) and rate limits surface.
+   * Those are precisely the errors that make a push "sent ok but never arrive on some devices".
+   * Never throws — returns an empty result on failure so the caller can log and move on.
+   *
+   * @param {string[]} ticketIds
+   * @returns {Promise<{ receipts: Record<string, object>, errorCount: number }>}
+   *   receipts is keyed by ticket id: { status: 'ok' | 'error', details?: { error } }.
+   */
+  async getReceipts(ticketIds) {
+    const receipts = {};
+    let errorCount = 0;
+    if (!ticketIds || !ticketIds.length) return { receipts, errorCount };
+    const idChunks = this.expo.chunkPushNotificationReceiptIds(ticketIds);
+    for (const idChunk of idChunks) {
+      try {
+        const chunkReceipts = await this.expo.getPushNotificationReceiptsAsync(idChunk);
+        for (const [id, receipt] of Object.entries(chunkReceipts)) {
+          receipts[id] = receipt;
+          if (receipt.status === 'error') {
+            errorCount += 1;
+            logger.warn(
+              { code: receipt.details?.error, message: receipt.message },
+              'expo push receipt error',
+            );
+          }
+        }
+      } catch (err) {
+        logger.warn({ err }, 'expo push receipt fetch failed');
+      }
+    }
+    return { receipts, errorCount };
   }
 }
 

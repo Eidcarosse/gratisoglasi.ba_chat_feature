@@ -10,8 +10,14 @@ import { logger } from '../../common/logger.js';
 import { AppError } from '../../common/errors/AppError.js';
 import { ExpoPushProvider } from './push.provider.js';
 import { pushSent, pushFailed, pushNoDevice } from '../../common/metrics.js';
+import { config } from '../../config/index.js';
 
 const MAX_BODY = 120;
+
+// Delay before a best-effort receipt check. Receipts confirm FCM/APNs actually delivered (vs. the
+// ticket, which only confirms Expo accepted). ~20s is enough for most; a durable delayed job
+// (survives restart) belongs in a future jobs/ module — this in-process timer is best-effort only.
+const RECEIPT_CHECK_DELAY_MS = 20_000;
 
 function preview(message) {
   if (!message) return 'New message';
@@ -55,10 +61,24 @@ export class NotificationService {
         ...(event.message?._id ? { messageId: String(event.message._id) } : {}),
         ...(event.itemTitle ? { itemTitle: event.itemTitle } : {}),
       };
-      const messages = devices.map((d) => ({ to: d.token, title, body, data, sound: 'default' }));
+      // priority:'high' → FCM high priority / APNs priority 10, so backgrounded/doze-mode Android
+      // devices (esp. battery-optimizing OEMs) actually wake and display it. channelId targets the
+      // client's high-importance Android channel; without a matching channel Android 8+ can silently
+      // drop it. Both were missing before — the root cause of "arrives on some devices, not others".
+      // channelId is ignored on iOS; priority is cross-platform.
+      const messages = devices.map((d) => ({
+        to: d.token,
+        title,
+        body,
+        data,
+        sound: 'default',
+        priority: 'high',
+        channelId: config.EXPO_ANDROID_CHANNEL_ID,
+      }));
 
       const {
         tickets = [],
+        receiptIdTokens = {},
         unregisteredTokens = [],
         unsupportedTokens = [],
         errorCount = 0,
@@ -66,6 +86,12 @@ export class NotificationService {
       // Prune ONLY tokens Expo confirmed as DeviceNotRegistered — never format-unsupported ones
       // (those are a client config issue, not a dead device; deleting them hid the real problem).
       if (unregisteredTokens.length) await this.devices.deleteByTokens(unregisteredTokens);
+
+      // Best-effort delivery check: a ticket 'ok' only means Expo accepted the push; the receipt is
+      // where FCM/APNs credential failures + rate limits surface (the "sent ok but never arrives"
+      // case). Fire-and-forget on an unref'd timer so it never blocks the message ack or crashes the
+      // process. Lost on restart — good enough for diagnostics; move to a durable job when needed.
+      this.scheduleReceiptCheck(receiptIdTokens);
 
       const okCount = tickets.filter((t) => t.status === 'ok').length;
       pushSent.inc(okCount);
@@ -88,6 +114,37 @@ export class NotificationService {
       logger.error({ err, userId: event?.userId }, 'notification send failed');
       return { delivered: false, error: true };
     }
+  }
+
+  /**
+   * Best-effort, fire-and-forget delivery-receipt check. Waits RECEIPT_CHECK_DELAY_MS, then asks
+   * Expo for the receipts of the accepted tickets. Logs any receipt error (the real reason a push
+   * silently failed) and prunes tokens reported DeviceNotRegistered. Never throws and never blocks:
+   * the timer is unref'd so it can't hold the process open, and the provider swallows its own errors.
+   * @param {Record<string, string>} receiptIdTokens  ticket id → token
+   */
+  scheduleReceiptCheck(receiptIdTokens) {
+    const ids = Object.keys(receiptIdTokens || {});
+    if (!ids.length || typeof this.push.getReceipts !== 'function') return;
+    const timer = setTimeout(async () => {
+      try {
+        const { receipts, errorCount } = await this.push.getReceipts(ids);
+        const dead = [];
+        for (const [id, receipt] of Object.entries(receipts)) {
+          if (receipt.status === 'error' && receipt.details?.error === 'DeviceNotRegistered') {
+            const token = receiptIdTokens[id];
+            if (token) dead.push(token);
+          }
+        }
+        if (dead.length) await this.devices.deleteByTokens(dead);
+        if (errorCount || dead.length) {
+          logger.warn({ errorCount, pruned: dead.length }, 'push receipt check found delivery errors');
+        }
+      } catch (err) {
+        logger.error({ err }, 'push receipt check failed');
+      }
+    }, RECEIPT_CHECK_DELAY_MS);
+    if (typeof timer.unref === 'function') timer.unref();
   }
 
   /**

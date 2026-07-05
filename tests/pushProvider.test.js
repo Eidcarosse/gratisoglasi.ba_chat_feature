@@ -9,11 +9,13 @@ import { ExpoPushProvider } from '../src/modules/notifications/push.provider.js'
 import { NotificationService } from '../src/modules/notifications/notification.service.js';
 
 // Build a provider with a stubbed Expo SDK: one chunk == all messages, custom send behavior.
-function providerWith(sendImpl) {
+function providerWith(sendImpl, receiptsImpl) {
   const p = new ExpoPushProvider();
   p.expo = {
     chunkPushNotifications: (msgs) => (msgs.length ? [msgs] : []),
     sendPushNotificationsAsync: sendImpl,
+    chunkPushNotificationReceiptIds: (ids) => (ids.length ? [ids] : []),
+    getPushNotificationReceiptsAsync: receiptsImpl,
   };
   return p;
 }
@@ -42,6 +44,12 @@ describe('ExpoPushProvider.send', () => {
     expect(errorCount).toBe(0);
   });
 
+  it('maps accepted ticket ids back to their token for a later receipt check', async () => {
+    const send = vi.fn().mockResolvedValue([{ status: 'ok', id: 'rcpt-1' }]);
+    const res = await providerWith(send).send([msg('ExponentPushToken[a]')]);
+    expect(res.receiptIdTokens).toEqual({ 'rcpt-1': 'ExponentPushToken[a]' });
+  });
+
   it('reports format-invalid tokens as unsupported and does NOT send or prune them', async () => {
     const send = vi.fn();
     const res = await providerWith(send).send([msg('not-an-expo-token')]);
@@ -66,6 +74,32 @@ describe('ExpoPushProvider.send', () => {
     expect(res.tickets).toEqual([]);
     expect(res.errorCount).toBe(1);
     expect(res.unregisteredTokens).toEqual([]);
+  });
+});
+
+describe('ExpoPushProvider.getReceipts', () => {
+  it('returns receipts keyed by id and counts errors', async () => {
+    const receipts = vi.fn().mockResolvedValue({
+      'r-ok': { status: 'ok' },
+      'r-bad': { status: 'error', details: { error: 'DeviceNotRegistered' }, message: 'gone' },
+    });
+    const res = await providerWith(vi.fn(), receipts).getReceipts(['r-ok', 'r-bad']);
+    expect(res.receipts['r-ok'].status).toBe('ok');
+    expect(res.receipts['r-bad'].details.error).toBe('DeviceNotRegistered');
+    expect(res.errorCount).toBe(1);
+  });
+
+  it('is a no-op for an empty id list (no SDK call)', async () => {
+    const receipts = vi.fn();
+    const res = await providerWith(vi.fn(), receipts).getReceipts([]);
+    expect(receipts).not.toHaveBeenCalled();
+    expect(res).toEqual({ receipts: {}, errorCount: 0 });
+  });
+
+  it('swallows a receipt-fetch failure without throwing', async () => {
+    const receipts = vi.fn().mockRejectedValue(new Error('expo down'));
+    const res = await providerWith(vi.fn(), receipts).getReceipts(['r-1']);
+    expect(res).toEqual({ receipts: {}, errorCount: 0 });
   });
 });
 
@@ -114,6 +148,36 @@ describe('NotificationService token handling', () => {
     const res = await svc.notify({ type: 'message', userId: 'u1', message: { body: 'hi' } });
     expect(deleteByTokens).toHaveBeenCalledWith(['ExponentPushToken[dead]']); // ONLY the dead one
     expect(res.delivered).toBe(true);
+  });
+
+  it('schedules a receipt check that prunes tokens the receipt reports DeviceNotRegistered', async () => {
+    vi.useFakeTimers();
+    try {
+      const deleteByTokens = vi.fn().mockResolvedValue({ deletedCount: 1 });
+      const push = {
+        send: async () => ({
+          tickets: [{ status: 'ok' }],
+          receiptIdTokens: { 'r-1': 'ExponentPushToken[dead]' },
+          unregisteredTokens: [],
+          unsupportedTokens: [],
+          errorCount: 0,
+        }),
+        getReceipts: async () => ({
+          receipts: { 'r-1': { status: 'error', details: { error: 'DeviceNotRegistered' } } },
+          errorCount: 1,
+        }),
+      };
+      const svc = svcWith(push, vi.fn(), deleteByTokens);
+      svc.devices.findByUserId = vi
+        .fn()
+        .mockResolvedValue([{ token: 'ExponentPushToken[dead]', platform: 'android' }]);
+
+      await svc.notify({ type: 'message', userId: 'u1', message: { body: 'hi' } });
+      await vi.runOnlyPendingTimersAsync(); // fire the deferred receipt check
+      expect(deleteByTokens).toHaveBeenCalledWith(['ExponentPushToken[dead]']);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('notify reports no-device cleanly when the recipient has no registered device', async () => {
