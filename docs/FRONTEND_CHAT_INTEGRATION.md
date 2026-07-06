@@ -348,6 +348,8 @@ seller for a given item. If it already exists, the existing one is returned.
   - Item has no seller → `400 VALIDATION`.
   - You are the seller (buyer == seller) → `400 VALIDATION`
     ("You cannot start a conversation with yourself").
+  - Either user has blocked the other → `403 FORBIDDEN`
+    ("You cannot start a conversation with this user") — see §5.12.
   - Over rate limit → `429 RATE_LIMITED`.
 
 ### 5.3 `GET /conversations/:conversationId` — open one (live overlay)
@@ -452,9 +454,13 @@ when the socket is unavailable.
 - **201 response:** `{ "message": Message }` (the persisted message, with its real `_id`,
   `createdAt`, and the same `clientMessageId` you sent).
 - **Error cases:** validation → `400 VALIDATION` (e.g. text with empty body, bad UUID, body
-  > 4000); not a participant → `403 FORBIDDEN`; over limit → `429 RATE_LIMITED`.
+  > 4000); not a participant → `403 FORBIDDEN`; **either user has blocked the other → `403 FORBIDDEN`**
+  ("You cannot message this user", see §5.12); over limit → `429 RATE_LIMITED`.
 
 > Sending a duplicate `clientMessageId` is **not** an error — you get the original message back.
+
+> The same block guard applies to the socket `message:send` (§6.1) — a blocked send acks
+> `{ ok:false, error:{ code:"FORBIDDEN" } }`.
 
 ### 5.6 `POST /uploads/direct-upload` — get one-time Cloudflare upload URLs (Direct Creator Upload)
 
@@ -642,7 +648,70 @@ another user's token).
 
 > See §10.5 for the full push behavior (when a push fires, payload shape, dead-token pruning).
 
-### 5.12 Health endpoints (informational, no auth)
+### 5.12 `POST /blocks` — block a user
+
+Block another user. Once blocked, **neither** party can message the other or start a new
+conversation — the block is **bidirectional** regardless of who created it. Existing
+conversations and their history stay **visible** to both users; only *sending* is prevented
+(see §10.5). Idempotent: re-blocking the same user is not an error.
+
+- **Auth:** required. The blocker is the authenticated user — you send only the **target** id.
+- **Request body:**
+
+```json
+{ "userId": "64b2f0c2a1d4e5f600000222" }
+```
+
+| Field    | Type            | Rules                                                          |
+| -------- | --------------- | ------------------------------------------------------------- |
+| `userId` | string (24-hex) | Required. The user to block. Must not be yourself; must exist. |
+
+- **201 response:** `{ "ok": true }`.
+- **Error cases:** blocking yourself → `400 VALIDATION` ("You cannot block yourself"); malformed
+  `userId` → `400 VALIDATION`; the target user does not exist → `404 NOT_FOUND`.
+- **No socket event** is emitted; the other user is not notified they were blocked.
+
+### 5.13 `DELETE /blocks/:userId` — unblock a user
+
+Remove a block **you** created. After unblocking, both users can message and start conversations
+again. Idempotent — unblocking a user you had not blocked still returns `200`.
+
+- **Auth:** required. Only removes a block where you are the blocker.
+- **Path param:** `userId` (24-hex) — the user to unblock.
+- **Body:** none.
+- **200 response:** `{ "ok": true }`.
+- **Error cases:** malformed `userId` → `400 VALIDATION`.
+
+### 5.14 `GET /blocks` — list users you have blocked
+
+Return the users **you** have blocked, newest first, each hydrated with display info. Only your
+own outgoing blocks are returned — there is no way to see who has blocked you.
+
+- **Auth:** required.
+- **Query:** none.
+- **200 response:**
+
+```json
+{
+  "blocks": [
+    {
+      "userId": "64b2f0c2a1d4e5f600000222",
+      "displayName": "Jane Seller",
+      "avatarUrl": "https://…/avatar.jpg",
+      "createdAt": "2026-07-06T12:00:00.000Z"
+    }
+  ]
+}
+```
+
+| Field         | Type           | Notes                                                         |
+| ------------- | -------------- | ------------------------------------------------------------- |
+| `userId`      | string         | The blocked user's id.                                        |
+| `displayName` | string         | Derived server-side (falls back to `"User"`).                 |
+| `avatarUrl`   | string \| null | The blocked user's avatar, or `null`.                         |
+| `createdAt`   | ISO string     | When the block was created.                                   |
+
+### 5.15 Health endpoints (informational, no auth)
 
 | Method | Path       | Meaning                                                               |
 | ------ | ---------- | --------------------------------------------------------------------- |
@@ -973,6 +1042,9 @@ message` index for optimistic reconcile and dedupe of `message:new` echoes.
 | POST   | `/uploads/direct-upload`                 | ✅ (20/60s) | `{ count? }` (1–5, default 1)                                        | `200 { uploads:[{id,uploadURL}], failed, expiresInSeconds }` — then upload bytes DIRECT to Cloudflare |
 | POST   | `/devices`                               | ✅          | `{ token, platform }`                                                | `201 { ok }` — register Expo push token                                           |
 | DELETE | `/devices`                               | ✅          | `{ token }`                                                          | `200 { ok }` — unregister on logout                                               |
+| GET    | `/blocks`                                | ✅          | —                                                                    | `200 { blocks:[{ userId, displayName, avatarUrl, createdAt }] }` — users I blocked |
+| POST   | `/blocks`                                | ✅          | `{ userId }`                                                         | `201 { ok }` — block a user (bidirectional; idempotent)                           |
+| DELETE | `/blocks/:userId`                        | ✅          | —                                                                    | `200 { ok }` — unblock (idempotent)                                               |
 | GET    | `/healthz` `/readyz` `/metrics`          | —           | —                                                                    | health/metrics                                                                    |
 
 ### 10.2 Socket events
@@ -1070,6 +1142,15 @@ A new message in that conversation makes it reappear. No socket event is emitted
 **Mute.** `PATCH /conversations/:id/mute { muted }` toggles push suppression for the caller.
 Muting does **not** stop unread counts — only push. The `muted` state is per-participant.
 
+**Block.** `POST /blocks { userId }` / `DELETE /blocks/:userId` / `GET /blocks` (§5.12–5.14).
+A block is **bidirectional**: while it exists, **both** users are prevented from sending messages
+and from starting a new conversation with each other — a blocked send fails with `403 FORBIDDEN`
+on REST and acks `{ ok:false, error:{ code:"FORBIDDEN" } }` on the socket. Existing conversations
+and history stay **visible and readable** to both sides; nothing is deleted or hidden. The blocked
+user is **not** notified. `GET /blocks` returns only the blocks you created (you cannot see who
+blocked you). Client guidance: surface the `403 FORBIDDEN` on send as a "you can't message this
+user" state and disable the composer; refresh block state from `GET /blocks`.
+
 ### 10.6 Source-of-truth files (server)
 
 | Contract                           | File                                                                                                                  |
@@ -1080,6 +1161,7 @@ Muting does **not** stop unread counts — only push. The `muted` state is per-p
 | Error codes & shape                | `src/common/errors/AppError.js`                                                                                       |
 | Conversation routes/controller     | `src/modules/conversations/conversation.{routes,controller}.js`                                                       |
 | Message routes/controller          | `src/modules/messages/message.{routes,controller}.js`                                                                 |
+| Block routes/controller/service    | `src/modules/blocks/block.{routes,controller,service,repository,model}.js`                                             |
 | Socket handlers                    | `src/realtime/handlers/{message,typing,presence}.handler.js`                                                          |
 | Connection lifecycle / rooms       | `src/realtime/gateway.js`, `src/realtime/rooms.js`                                                                    |
 | Image upload                       | `src/modules/uploads/{upload.routes,upload.controller,upload.service,cloudflareImages.client}.js`                     |

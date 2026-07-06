@@ -26,6 +26,10 @@ import { createAuthMiddleware } from '../modules/auth/auth.middleware.js';
 import { GratisRepository } from '../integrations/gratis/gratis.repository.js';
 import { GratisService } from '../integrations/gratis/gratis.service.js';
 
+import { BlockRepository } from '../modules/blocks/block.repository.js';
+import { BlockService } from '../modules/blocks/block.service.js';
+import { BlockModel } from '../modules/blocks/block.model.js';
+
 import { ConversationRepository } from '../modules/conversations/conversation.repository.js';
 import { ConversationService } from '../modules/conversations/conversation.service.js';
 import { ConversationModel } from '../modules/conversations/conversation.model.js';
@@ -63,9 +67,17 @@ export function buildContainer({ gratisConn }) {
   const gratisRepository = new GratisRepository(gratisConn);
   const gratisService = new GratisService(gratisRepository);
 
+  // --- Blocks (built BEFORE conversationService/messageService — both consult it to guard sends) ---
+  const blockRepository = new BlockRepository();
+  const blockService = new BlockService({ blockRepository, gratisService });
+
   // --- Conversations ---
   const conversationRepository = new ConversationRepository();
-  const conversationService = new ConversationService({ conversationRepository, gratisService });
+  const conversationService = new ConversationService({
+    conversationRepository,
+    gratisService,
+    blockService,
+  });
 
   // --- Message store seam ---
   let messageRepository;
@@ -107,6 +119,7 @@ export function buildContainer({ gratisConn }) {
     notificationService,
     presenceService,
     uploadService,
+    blockService,
   });
 
   logger.info(
@@ -122,6 +135,7 @@ export function buildContainer({ gratisConn }) {
     newConversationLimiter,
     // services
     gratisService,
+    blockService,
     conversationService,
     messageService,
     presenceService,
@@ -131,7 +145,7 @@ export function buildContainer({ gratisConn }) {
     uploadService,
     gateway,
     // models (for index sync)
-    models: [ConversationModel, MessageModel, DeviceModel],
+    models: [BlockModel, ConversationModel, MessageModel, DeviceModel],
   };
 }
 

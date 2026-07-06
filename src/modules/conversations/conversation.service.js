@@ -20,10 +20,12 @@ export class ConversationService {
    * @param {object} deps
    * @param {import('./conversation.repository.js').ConversationRepository} deps.conversationRepository
    * @param {import('../../integrations/gratis/gratis.service.js').GratisService} deps.gratisService
+   * @param {import('../blocks/block.service.js').BlockService} deps.blockService
    */
-  constructor({ conversationRepository, gratisService }) {
+  constructor({ conversationRepository, gratisService, blockService }) {
     this.repo = conversationRepository;
     this.gratis = gratisService;
+    this.blocks = blockService;
   }
 
   /**
@@ -39,6 +41,11 @@ export class ConversationService {
     const sellerId = snapshot.sellerId;
     if (String(buyerId) === String(sellerId)) {
       throw AppError.validation('You cannot start a conversation with yourself');
+    }
+
+    // A block in either direction bars starting a conversation between the two users.
+    if (await this.blocks.isBlockedBetween(buyerId, sellerId)) {
+      throw AppError.forbidden('You cannot start a conversation with this user');
     }
 
     const summaries = await this.gratis.getUserSummaries([buyerId, sellerId]);

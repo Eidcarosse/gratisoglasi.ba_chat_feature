@@ -31,6 +31,7 @@ export class MessageService {
     notificationService,
     presenceService,
     uploadService,
+    blockService,
   }) {
     this.repo = messageRepository;
     this.conversations = conversationService;
@@ -38,11 +39,19 @@ export class MessageService {
     this.notifications = notificationService;
     this.presence = presenceService;
     this.uploads = uploadService;
+    this.blocks = blockService;
   }
 
   async send({ conversationId, senderId, clientMessageId, type, body, attachments = [] }) {
     // Authorize: membership is the real guard (identity is spoofable under dev-trust).
     const convo = await this.conversations.getMemberConversation(conversationId, senderId);
+
+    // A block in either direction bars messaging between the two participants (covers both the
+    // REST controller and the message:send socket handler, which share this single write path).
+    const recipientId = convo.participantIds.map(String).find((id) => id !== String(senderId));
+    if (recipientId && (await this.blocks.isBlockedBetween(senderId, recipientId))) {
+      throw AppError.forbidden('You cannot message this user');
+    }
 
     const doc = {
       conversationId: oid(conversationId),

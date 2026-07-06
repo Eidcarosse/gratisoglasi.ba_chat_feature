@@ -30,6 +30,12 @@ export class GratisService {
     };
   }
 
+  /** True if a main-site user with this id exists (used to reject blocking a non-existent user). */
+  async userExists(id) {
+    const user = await this.repo.getUserById(id);
+    return Boolean(user);
+  }
+
   /** @returns {Promise<Map<string, {displayName: string, avatarUrl: string|null}>>} */
   async getUserSummaries(ids) {
     const unique = [...new Set((ids || []).map(String))];

@@ -13,6 +13,7 @@ import { httpLogger, logger } from '../common/logger.js';
 import { metricsHandler } from '../common/metrics.js';
 import { AppError, ErrorCodes } from '../common/errors/AppError.js';
 import { databasesReady } from './db.js';
+import { createBlockRoutes } from '../modules/blocks/block.routes.js';
 import { createConversationRoutes } from '../modules/conversations/conversation.routes.js';
 import { createMessageRoutes } from '../modules/messages/message.routes.js';
 import { createUploadRoutes } from '../modules/uploads/upload.routes.js';
@@ -44,6 +45,7 @@ export function createExpressApp(container) {
   app.use('/conversations/:conversationId/messages', createMessageRoutes(container));
   app.use('/uploads', createUploadRoutes(container));
   app.use('/devices', createDeviceRoutes(container));
+  app.use('/blocks', createBlockRoutes(container));
 
   // Unknown route → 404 in the standard error shape.
   app.use((_req, _res, next) => next(AppError.notFound('Route not found')));
