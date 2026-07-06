@@ -3,7 +3,7 @@
  * send(): authorize (sender ∈ conversation.participantIds via conversationService), sanitize body,
  * messageRepository.append() (idempotent), then — only on a genuinely new message — update the
  * conversation inbox snapshot via conversationService, emit message:new through the gateway, and
- * notify offline recipients. Idempotent append + client dedup = feels exactly-once.
+ * push-notify all non-muted recipients. Idempotent append + client dedup = feels exactly-once.
  * history(): keyset pagination. syncSince(): messages newer than a client cursor.
  * Depends on IMessageRepository (NOT a concrete store), conversationService, gateway,
  * notificationService, presenceService — all injected. Must NOT touch any DB driver directly.
@@ -68,29 +68,26 @@ export class MessageService {
       this.gateway.emitToConversation(conversationId, EVENTS.MESSAGE_NEW, { message });
       this.gateway.emitToUser(senderId, EVENTS.MESSAGE_NEW, { message });
 
-      // Offline path: push to recipients with no active socket — unless they muted this convo.
+      // Push to every non-muted recipient, regardless of presence. A backgrounded app keeps its
+      // socket alive, so "has a socket" can't distinguish visible from not — gating on it silently
+      // dropped pushes for backgrounded devices. The client's foreground notification handler
+      // decides whether to display it when the app is already open.
       const senderName = convo.participants?.[String(senderId)]?.displayName || 'New message';
       const itemTitle = convo.item?.title;
       const mutedSet = new Set((convo.mutedBy || []).map(String));
       const recipientIds = convo.participantIds.map(String).filter((id) => id !== String(senderId));
       for (const rid of recipientIds) {
         if (mutedSet.has(rid)) continue; // muted → no push (unread still incremented above)
-        const online = this.presence ? await this.presence.isOnline(rid) : false;
-        if (online) {
-          // Counted as online (note: a backgrounded app with a still-connected socket also counts
-          // here) → no push. A high ratio of this vs. chat_push_sent_total is the signal that push
-          // isn't firing because recipients look online.
-          pushRecipientOnline.inc();
-        } else {
-          await this.notifications.notify({
-            type: 'message',
-            userId: rid,
-            conversationId,
-            message,
-            senderName,
-            itemTitle,
-          });
-        }
+        // Informational only: how often we push to a recipient who also has a live socket.
+        if (this.presence && (await this.presence.isOnline(rid))) pushRecipientOnline.inc();
+        await this.notifications.notify({
+          type: 'message',
+          userId: rid,
+          conversationId,
+          message,
+          senderName,
+          itemTitle,
+        });
       }
     }
 

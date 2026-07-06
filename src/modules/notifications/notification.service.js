@@ -1,7 +1,7 @@
 /**
  * Layer: Service — the notify() seam + device registration.
- * notify(event) is the single entry point for out-of-band delivery (a message to an offline,
- * non-muted recipient). It looks up the recipient's devices and sends via the push provider
+ * notify(event) is the single entry point for out-of-band delivery (a message to a non-muted
+ * recipient). It looks up the recipient's devices and sends via the push provider
  * (Expo), pruning any tokens Expo rejects. It MUST NEVER throw — it runs inside messageService's
  * send side-effect, so a failure here must not fail the message send/ack.
  * Also owns device register/unregister (delegating to the device repository).
@@ -10,7 +10,6 @@ import { logger } from '../../common/logger.js';
 import { AppError } from '../../common/errors/AppError.js';
 import { ExpoPushProvider } from './push.provider.js';
 import { pushSent, pushFailed, pushNoDevice } from '../../common/metrics.js';
-import { config } from '../../config/index.js';
 
 const MAX_BODY = 120;
 
@@ -62,10 +61,8 @@ export class NotificationService {
         ...(event.itemTitle ? { itemTitle: event.itemTitle } : {}),
       };
       // priority:'high' → FCM high priority / APNs priority 10, so backgrounded/doze-mode Android
-      // devices (esp. battery-optimizing OEMs) actually wake and display it. channelId targets the
-      // client's high-importance Android channel; without a matching channel Android 8+ can silently
-      // drop it. Both were missing before — the root cause of "arrives on some devices, not others".
-      // channelId is ignored on iOS; priority is cross-platform.
+      // devices (esp. battery-optimizing OEMs) actually wake and display it. No channelId is sent —
+      // Expo targets the app's default Android channel.
       const messages = devices.map((d) => ({
         to: d.token,
         title,
@@ -73,7 +70,6 @@ export class NotificationService {
         data,
         sound: 'default',
         priority: 'high',
-        channelId: config.EXPO_ANDROID_CHANNEL_ID,
       }));
 
       const {

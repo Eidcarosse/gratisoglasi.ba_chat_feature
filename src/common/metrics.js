@@ -57,12 +57,12 @@ export const pushFailed = new client.Counter({
 });
 export const pushNoDevice = new client.Counter({
   name: 'chat_push_no_device_total',
-  help: 'Offline recipients with no registered device (nothing to push to)',
+  help: 'Push recipients with no registered device (nothing to push to)',
   registers: [registry],
 });
 export const pushRecipientOnline = new client.Counter({
   name: 'chat_push_recipient_online_total',
-  help: 'New-message recipients skipped for push because they were counted as online',
+  help: 'Pushes sent to recipients who also had a live socket (informational; push is not gated on presence)',
   registers: [registry],
 });
 

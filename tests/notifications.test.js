@@ -77,10 +77,9 @@ describe('push notifications', () => {
     expect(lastMessages[0].title).toBe('B Uyer'); // sender displayName
     expect(lastMessages[0].body).toBe('Hello there');
     expect(lastMessages[0].data.conversationId).toBe(convoId);
-    // Delivery-reliability fields: high priority wakes doze-mode Android; channelId targets the
-    // client's high-importance channel (default 'default'). Missing before → dropped on some devices.
+    // Delivery-reliability field: high priority wakes doze-mode Android devices.
     expect(lastMessages[0].priority).toBe('high');
-    expect(lastMessages[0].channelId).toBe('default');
+    expect(lastMessages[0].channelId).toBeUndefined();
   });
 
   it('previews image messages as a photo label', async () => {
@@ -92,10 +91,11 @@ describe('push notifications', () => {
     expect(lastMessages[0].body).toBe('📷 Photo');
   });
 
-  it('does not push to an online recipient', async () => {
+  it('pushes even when the recipient is online (backgrounded apps keep sockets connected)', async () => {
     await ctx.container.presenceService.online(String(sellerId), 'sock-1');
     await sendAs(buyerId, { clientMessageId: randomUUID(), type: 'text', body: 'online test' });
-    expect(lastMessages).toBeUndefined();
+    expect(lastMessages).toBeTruthy();
+    expect(lastMessages[0].body).toBe('online test');
     await ctx.container.presenceService.offline(String(sellerId), 'sock-1');
   });
 

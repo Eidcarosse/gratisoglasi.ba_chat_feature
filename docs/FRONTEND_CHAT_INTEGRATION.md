@@ -572,7 +572,7 @@ message** in that conversation makes it reappear in your inbox automatically.
 ### 5.8 `PATCH /conversations/:conversationId/mute` — mute / unmute
 
 Toggle **push-notification** suppression for this conversation, for **you** only. Muting does
-**not** stop unread counts or message delivery — it only suppresses the offline push.
+**not** stop unread counts or message delivery — it only suppresses the push notification.
 
 - **Auth:** required. Must be a participant, else `403 FORBIDDEN`.
 - **Path param:** `conversationId` (24-hex).
@@ -612,7 +612,7 @@ unsend it. The message is **tombstoned** (kept in history with `body:""`, `attac
 ### 5.10 `POST /devices` — register a push token
 
 Register (or refresh) this device's **Expo** push token so the user receives new-message
-notifications while offline. Call on login / app start. Upserts by `token`: re-registering an
+notifications. Call on login / app start. Upserts by `token`: re-registering an
 existing token reassigns it to the current user (correct for shared devices).
 
 - **Auth:** required.
@@ -1010,18 +1010,20 @@ message` index for optimistic reconcile and dedupe of `message:new` echoes.
 | `CORS_ORIGINS`      | `*`     | Must include your web origin (RN native is unaffected; Expo web isn't). `credentials: true`. |
 | `AUTH_MODE`         | `dev`   | `dev` → token = userId; `jwt` → token = signed JWT (same wiring).                            |
 | `EXPO_ACCESS_TOKEN` | —       | Server-side only; push works without it. No client impact.                                   |
-| `EXPO_ANDROID_CHANNEL_ID` | `default` | The Android channel the server targets — the client's `setNotificationChannelAsync` id **must** match it (§10.5). |
 
 ### 10.5 Push notifications, delete & mute (behavior)
 
 **Push (Expo).** Register the device's Expo push token after login/app-start with
 `POST /devices { token: "ExponentPushToken[...]", platform: "ios"|"android"|"web" }`, and
-`DELETE /devices { token }` on logout. The server pushes a new-message notification to a
-recipient **only when they have no active socket** (are offline) **and** have not muted the
-conversation. Payload: `title` = sender's display name, `body` = the text (truncated) or
+`DELETE /devices { token }` on logout. The server pushes a new-message notification to **every
+recipient who has not muted the conversation — regardless of socket presence** (a backgrounded
+app keeps its socket alive, so presence can't tell whether the app is visible). Use the foreground
+notification handler (point 2 below) to decide whether to show the alert when the relevant
+conversation is already open, so users don't get a system banner on top of the in-app message.
+Payload: `title` = sender's display name, `body` = the text (truncated) or
 `📷 Photo` / `📎 File`, `data = { type, conversationId, messageId?, itemTitle? }` — use `data`
 to deep-link into the conversation (and, via `conversation.itemId`, the ad). The server also sends
-`priority: "high"` and `channelId` (see below). Tokens Expo reports as `DeviceNotRegistered` are
+`priority: "high"`. Tokens Expo reports as `DeviceNotRegistered` are
 pruned server-side; re-register on each app start.
 
 **⚠️ Required client setup (or Android delivery is unreliable).** The token is only half of it —
@@ -1040,9 +1042,9 @@ Android devices and silently not on others (while the Expo push test tool still 
      }),
    });
    ```
-3. **Android channel — the id MUST equal the server's `EXPO_ANDROID_CHANNEL_ID` (default
-   `"default"`).** Android 8+ drops or silences any notification whose `channelId` has no matching
-   high-importance channel:
+3. **Android channel (recommended).** The server sends no `channelId`, so Expo targets the app's
+   default Android channel. Registering it explicitly with HIGH importance ensures notifications
+   show heads-up with sound instead of inheriting a low-importance auto-created channel:
    ```js
    if (Platform.OS === 'android') {
      await Notifications.setNotificationChannelAsync('default', {
