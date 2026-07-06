@@ -61,26 +61,40 @@ export class MessageService {
     // Idempotent: a resend (same clientMessageId) returns the canonical copy without re-emitting
     // or re-incrementing unread counts.
     if (created) {
-      await this.conversations.recordMessage(convo, message);
-      messagesSent.inc();
-
-      // Deliver to everyone in the conversation room, plus the sender's other devices.
+      // Realtime first — online clients see the message immediately.
       this.gateway.emitToConversation(conversationId, EVENTS.MESSAGE_NEW, { message });
       this.gateway.emitToUser(senderId, EVENTS.MESSAGE_NEW, { message });
 
-      // Push to every non-muted recipient, regardless of presence. A backgrounded app keeps its
-      // socket alive, so "has a socket" can't distinguish visible from not — gating on it silently
-      // dropped pushes for backgrounded devices. The client's foreground notification handler
-      // decides whether to display it when the app is already open.
-      const senderName = convo.participants?.[String(senderId)]?.displayName || 'New message';
-      const itemTitle = convo.item?.title;
-      const mutedSet = new Set((convo.mutedBy || []).map(String));
-      const recipientIds = convo.participantIds.map(String).filter((id) => id !== String(senderId));
-      for (const rid of recipientIds) {
-        if (mutedSet.has(rid)) continue; // muted → no push (unread still incremented above)
-        // Informational only: how often we push to a recipient who also has a live socket.
-        if (this.presence && (await this.presence.isOnline(rid))) pushRecipientOnline.inc();
-        await this.notifications.notify({
+      // Fire push immediately (don't block on inbox DB writes or Expo round-trips). A backgrounded
+      // app keeps its socket alive, so presence can't tell whether the app is visible — push every
+      // non-muted recipient and let the client's foreground handler suppress in-app banners.
+      this.dispatchMessagePush({ convo, conversationId, message, senderId });
+
+      await this.conversations.recordMessage(convo, message);
+      messagesSent.inc();
+    }
+
+    return message;
+  }
+
+  /**
+   * Fire-and-forget push fan-out for a new message. Never awaited — notify() must not block acks.
+   * @private
+   */
+  dispatchMessagePush({ convo, conversationId, message, senderId }) {
+    const senderName = convo.participants?.[String(senderId)]?.displayName || 'New message';
+    const itemTitle = convo.item?.title;
+    const mutedSet = new Set((convo.mutedBy || []).map(String));
+    const recipientIds = convo.participantIds.map(String).filter((id) => id !== String(senderId));
+    const jobs = recipientIds
+      .filter((rid) => !mutedSet.has(rid))
+      .map((rid) => {
+        if (this.presence) {
+          void this.presence.isOnline(rid).then((online) => {
+            if (online) pushRecipientOnline.inc();
+          });
+        }
+        return this.notifications.notify({
           type: 'message',
           userId: rid,
           conversationId,
@@ -88,10 +102,9 @@ export class MessageService {
           senderName,
           itemTitle,
         });
-      }
-    }
-
-    return message;
+      });
+    if (!jobs.length) return;
+    void Promise.allSettled(jobs);
   }
 
   async history(conversationId, userId, { before, limit } = {}) {

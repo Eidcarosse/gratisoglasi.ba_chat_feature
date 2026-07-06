@@ -54,29 +54,32 @@ export class ExpoPushProvider {
     const unregisteredTokens = [];
     let errorCount = 0;
     const chunks = this.expo.chunkPushNotifications(valid);
-    for (const chunk of chunks) {
-      try {
-        const receipts = await this.expo.sendPushNotificationsAsync(chunk);
-        // Tickets come back in the chunk's message order.
-        receipts.forEach((ticket, i) => {
-          tickets.push(ticket);
-          if (ticket.status === 'ok') {
-            // Remember which token this ticket belongs to so a later receipt check can prune it.
-            if (ticket.id) receiptIdTokens[ticket.id] = chunk[i].to;
-          } else if (ticket.status === 'error') {
-            errorCount += 1;
-            const code = ticket.details?.error;
-            if (code === 'DeviceNotRegistered') unregisteredTokens.push(chunk[i].to);
-            // Surface EVERY ticket error (bad payload, message-too-big, rate limits, etc.) — these
-            // used to be invisible, hiding the real reason a push never arrived.
-            logger.warn({ code, message: ticket.message }, 'expo push ticket error');
-          }
-        });
-      } catch (err) {
+    const chunkResults = await Promise.allSettled(
+      chunks.map((chunk) => this.expo.sendPushNotificationsAsync(chunk)),
+    );
+    chunkResults.forEach((result, chunkIndex) => {
+      const chunk = chunks[chunkIndex];
+      if (result.status === 'rejected') {
         errorCount += chunk.length;
-        logger.warn({ err }, 'expo push chunk failed');
+        logger.warn({ err: result.reason }, 'expo push chunk failed');
+        return;
       }
-    }
+      // Tickets come back in the chunk's message order.
+      result.value.forEach((ticket, i) => {
+        tickets.push(ticket);
+        if (ticket.status === 'ok') {
+          // Remember which token this ticket belongs to so a later receipt check can prune it.
+          if (ticket.id) receiptIdTokens[ticket.id] = chunk[i].to;
+        } else if (ticket.status === 'error') {
+          errorCount += 1;
+          const code = ticket.details?.error;
+          if (code === 'DeviceNotRegistered') unregisteredTokens.push(chunk[i].to);
+          // Surface EVERY ticket error (bad payload, message-too-big, rate limits, etc.) — these
+          // used to be invisible, hiding the real reason a push never arrived.
+          logger.warn({ code, message: ticket.message }, 'expo push ticket error');
+        }
+      });
+    });
 
     return { tickets, receiptIdTokens, unregisteredTokens, unsupportedTokens, errorCount };
   }

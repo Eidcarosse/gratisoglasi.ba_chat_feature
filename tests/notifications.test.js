@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterAll, vi } from 'vitest';
 import request from 'supertest';
 import { randomUUID } from 'node:crypto';
 import { bootTestApp, seedUser, seedItem } from './helpers/app.js';
@@ -77,9 +77,10 @@ describe('push notifications', () => {
     expect(lastMessages[0].title).toBe('B Uyer'); // sender displayName
     expect(lastMessages[0].body).toBe('Hello there');
     expect(lastMessages[0].data.conversationId).toBe(convoId);
-    // Delivery-reliability field: high priority wakes doze-mode Android devices.
+    // Delivery-reliability fields for doze-mode Android devices.
     expect(lastMessages[0].priority).toBe('high');
-    expect(lastMessages[0].channelId).toBeUndefined();
+    expect(lastMessages[0].channelId).toBe('default');
+    expect(lastMessages[0].ttl).toBe(3600);
   });
 
   it('previews image messages as a photo label', async () => {
@@ -102,7 +103,13 @@ describe('push notifications', () => {
   it('prunes tokens Expo reports as invalid (DeviceNotRegistered)', async () => {
     returnInvalid = true;
     await sendAs(buyerId, { clientMessageId: randomUUID(), type: 'text', body: 'cleanup' });
-    const devices = await ctx.container.deviceRepository.findByUserId(String(sellerId));
-    expect(devices.length).toBe(0);
+    // Push is fire-and-forget after the message is saved — wait for notify() to prune.
+    await vi.waitFor(
+      async () => {
+        const devices = await ctx.container.deviceRepository.findByUserId(String(sellerId));
+        expect(devices.length).toBe(0);
+      },
+      { timeout: 2000 },
+    );
   });
 });

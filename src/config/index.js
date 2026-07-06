@@ -49,6 +49,9 @@ const envSchema = z
     // Expo Push (notifications). Optional — Expo accepts unauthenticated sends; an access token
     // only raises rate limits / enables FCM-v1 receipts. Push works without it.
     EXPO_ACCESS_TOKEN: z.string().optional(),
+    // Android notification channel id — must match setNotificationChannelAsync on the client
+    // (docs recommend 'default' with HIGH importance). Only sent for android-registered devices.
+    EXPO_ANDROID_CHANNEL_ID: z.string().default('default'),
   })
   .superRefine((env, ctx) => {
     // JWT mode is useless without a secret — fail fast rather than verifying against undefined.

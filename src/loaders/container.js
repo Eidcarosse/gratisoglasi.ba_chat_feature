@@ -84,7 +84,11 @@ export function buildContainer({ gratisConn }) {
   // --- Notifications (Expo push) + realtime emitter ---
   const deviceRepository = new DeviceRepository();
   const pushProvider = new ExpoPushProvider({ accessToken: config.EXPO_ACCESS_TOKEN });
-  const notificationService = new NotificationService({ deviceRepository, pushProvider });
+  const notificationService = new NotificationService({
+    deviceRepository,
+    pushProvider,
+    androidChannelId: config.EXPO_ANDROID_CHANNEL_ID,
+  });
   const gateway = new Gateway();
 
   // --- Uploads (built BEFORE messages so unsend can clean up Cloudflare images) ---

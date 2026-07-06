@@ -12,6 +12,9 @@ import { ExpoPushProvider } from './push.provider.js';
 import { pushSent, pushFailed, pushNoDevice } from '../../common/metrics.js';
 
 const MAX_BODY = 120;
+const DEFAULT_ANDROID_CHANNEL_ID = 'default';
+// High-priority Android pushes still need a non-zero TTL so FCM can wake doze-mode devices.
+const ANDROID_TTL_SEC = 3600;
 
 // Delay before a best-effort receipt check. Receipts confirm FCM/APNs actually delivered (vs. the
 // ticket, which only confirms Expo accepted). ~20s is enough for most; a durable delayed job
@@ -32,11 +35,14 @@ function preview(message) {
 
 export class NotificationService {
   /**
-   * @param {{ deviceRepository: import('./device.repository.js').DeviceRepository, pushProvider: { send: Function } }} deps
+   * @param {{ deviceRepository: import('./device.repository.js').DeviceRepository,
+   *           pushProvider: { send: Function },
+   *           androidChannelId?: string }} deps
    */
-  constructor({ deviceRepository, pushProvider }) {
+  constructor({ deviceRepository, pushProvider, androidChannelId = DEFAULT_ANDROID_CHANNEL_ID }) {
     this.devices = deviceRepository;
     this.push = pushProvider;
+    this.androidChannelId = androidChannelId;
   }
 
   /**
@@ -54,23 +60,34 @@ export class NotificationService {
 
       const title = event.senderName || 'New message';
       const body = preview(event.message);
+      // Expo requires every data value to be a string — non-strings can silently fail on Android.
       const data = {
-        type: event.type,
+        type: String(event.type ?? ''),
         conversationId: String(event.conversationId ?? ''),
         ...(event.message?._id ? { messageId: String(event.message._id) } : {}),
-        ...(event.itemTitle ? { itemTitle: event.itemTitle } : {}),
+        ...(event.itemTitle ? { itemTitle: String(event.itemTitle) } : {}),
       };
       // priority:'high' → FCM high priority / APNs priority 10, so backgrounded/doze-mode Android
-      // devices (esp. battery-optimizing OEMs) actually wake and display it. No channelId is sent —
-      // Expo targets the app's default Android channel.
-      const messages = devices.map((d) => ({
-        to: d.token,
-        title,
-        body,
-        data,
-        sound: 'default',
-        priority: 'high',
-      }));
+      // devices (esp. battery-optimizing OEMs) actually wake and display it. channelId + ttl target
+      // the client's high-importance Android channel and give FCM time to wake sleeping devices.
+      const messages = devices.map((d) => {
+        const base = {
+          to: d.token,
+          title,
+          body,
+          data,
+          sound: 'default',
+          priority: 'high',
+        };
+        if (d.platform === 'android') {
+          return {
+            ...base,
+            channelId: this.androidChannelId,
+            ttl: ANDROID_TTL_SEC,
+          };
+        }
+        return base;
+      });
 
       const {
         tickets = [],
