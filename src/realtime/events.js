@@ -18,6 +18,10 @@ export const EVENTS = Object.freeze({
   RECEIPT_UPDATE: 'receipt:update',
   TYPING: 'typing',
   PRESENCE_UPDATE: 'presence:update',
+  // Fires when a block between two users changes (either created or removed). Emitted to BOTH
+  // parties, each with the payload framed from their own perspective (see BlockService). Lets an
+  // already-open chat enable/disable its composer live and syncs the blocker's other devices.
+  BLOCK_UPDATE: 'block:update',
 });
 
 export default EVENTS;

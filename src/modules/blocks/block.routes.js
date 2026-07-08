@@ -15,6 +15,13 @@ export function createBlockRoutes(container) {
 
   router.get('/', requireAuth, controller.list);
 
+  router.get(
+    '/status/:userId',
+    requireAuth,
+    validate({ params: z.object({ userId: objectIdString }) }),
+    controller.status,
+  );
+
   router.post(
     '/',
     requireAuth,

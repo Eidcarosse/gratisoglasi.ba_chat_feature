@@ -67,9 +67,12 @@ export function buildContainer({ gratisConn }) {
   const gratisRepository = new GratisRepository(gratisConn);
   const gratisService = new GratisService(gratisRepository);
 
+  // --- Realtime emitter (built early: blockService emits block:update; io attaches later) ---
+  const gateway = new Gateway();
+
   // --- Blocks (built BEFORE conversationService/messageService — both consult it to guard sends) ---
   const blockRepository = new BlockRepository();
-  const blockService = new BlockService({ blockRepository, gratisService });
+  const blockService = new BlockService({ blockRepository, gratisService, gateway });
 
   // --- Conversations ---
   const conversationRepository = new ConversationRepository();
@@ -101,7 +104,6 @@ export function buildContainer({ gratisConn }) {
     pushProvider,
     androidChannelId: config.EXPO_ANDROID_CHANNEL_ID,
   });
-  const gateway = new Gateway();
 
   // --- Uploads (built BEFORE messages so unsend can clean up Cloudflare images) ---
   const cloudflareImages = new CloudflareImagesClient({

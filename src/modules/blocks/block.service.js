@@ -8,6 +8,7 @@
  */
 import mongoose from 'mongoose';
 import { AppError } from '../../common/errors/AppError.js';
+import { EVENTS } from '../../realtime/events.js';
 
 const oid = (v) => new mongoose.Types.ObjectId(v);
 
@@ -16,10 +17,12 @@ export class BlockService {
    * @param {object} deps
    * @param {import('./block.repository.js').BlockRepository} deps.blockRepository
    * @param {import('../../integrations/gratis/gratis.service.js').GratisService} deps.gratisService
+   * @param {import('../../realtime/gateway.js').Gateway} deps.gateway
    */
-  constructor({ blockRepository, gratisService }) {
+  constructor({ blockRepository, gratisService, gateway }) {
     this.repo = blockRepository;
     this.gratis = gratisService;
+    this.gateway = gateway;
   }
 
   /** Block a user. blockerId = authenticated caller; blockedId = the target. Idempotent. */
@@ -30,13 +33,14 @@ export class BlockService {
     if (!(await this.gratis.userExists(blockedId))) {
       throw AppError.notFound('User not found');
     }
-    return this.repo.create(oid(blockerId), oid(blockedId));
+    await this.repo.create(oid(blockerId), oid(blockedId));
+    return this.#afterChange(blockerId, blockedId);
   }
 
   /** Unblock a user. Idempotent — unblocking a user who isn't blocked is not an error. */
   async unblock(blockerId, blockedId) {
     await this.repo.remove(oid(blockerId), oid(blockedId));
-    return { ok: true };
+    return this.#afterChange(blockerId, blockedId);
   }
 
   /** List the users the caller has blocked, hydrated with their display name/avatar. */
@@ -58,6 +62,72 @@ export class BlockService {
   /** Bidirectional guard used by the write paths: true if either user blocked the other. */
   async isBlockedBetween(a, b) {
     return this.repo.existsBetween(oid(a), oid(b));
+  }
+
+  /**
+   * Directed block status for a pair, framed from `me`'s perspective. This is what the FE binds its
+   * composer to: blockedByMe -> offer "Unblock"; blockedByThem -> "This user blocked you";
+   * canMessage -> neither side blocked.
+   * @returns {Promise<{blockedByMe: boolean, blockedByThem: boolean, canMessage: boolean}>}
+   */
+  async statusBetween(me, other) {
+    const { aBlockedB, bBlockedA } = await this.repo.directionsBetween(oid(me), oid(other));
+    return {
+      blockedByMe: aBlockedB,
+      blockedByThem: bBlockedA,
+      canMessage: !(aBlockedB || bBlockedA),
+    };
+  }
+
+  /**
+   * Batch statusBetween for one caller against many others (inbox annotation, one query).
+   * @returns {Promise<Map<string, {blockedByMe: boolean, blockedByThem: boolean, canMessage: boolean}>>}
+   */
+  async statusMap(me, otherIds) {
+    const pairs = await this.repo.blockedPairsFor(
+      oid(me),
+      otherIds.map((id) => oid(id)),
+    );
+    const out = new Map();
+    for (const id of otherIds) {
+      const { blockedByMe = false, blockedByThem = false } = pairs.get(String(id)) || {};
+      out.set(String(id), {
+        blockedByMe,
+        blockedByThem,
+        canMessage: !(blockedByMe || blockedByThem),
+      });
+    }
+    return out;
+  }
+
+  /**
+   * After a block/unblock write: recompute the pair's directed state once and emit block:update to
+   * BOTH users, each framed from their own perspective (the blocked user sees the mirror image).
+   * Returns the caller's own BlockStatus so the controller can echo it in the HTTP response.
+   * @private
+   */
+  async #afterChange(blockerId, blockedId) {
+    const { aBlockedB, bBlockedA } = await this.repo.directionsBetween(
+      oid(blockerId),
+      oid(blockedId),
+    );
+    const canMessage = !(aBlockedB || bBlockedA);
+
+    // Blocker's perspective: "me" = blockerId, "other" = blockedId.
+    const blockerStatus = { blockedByMe: aBlockedB, blockedByThem: bBlockedA, canMessage };
+    // Blocked user's perspective: booleans mirror (their "blockedByMe" is aBlockedB flipped side).
+    const blockedStatus = { blockedByMe: bBlockedA, blockedByThem: aBlockedB, canMessage };
+
+    this.gateway?.emitToUser(String(blockerId), EVENTS.BLOCK_UPDATE, {
+      userId: String(blockedId),
+      ...blockerStatus,
+    });
+    this.gateway?.emitToUser(String(blockedId), EVENTS.BLOCK_UPDATE, {
+      userId: String(blockerId),
+      ...blockedStatus,
+    });
+
+    return blockerStatus;
   }
 }
 

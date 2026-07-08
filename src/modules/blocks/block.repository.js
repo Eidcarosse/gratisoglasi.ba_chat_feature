@@ -42,6 +42,57 @@ export class BlockRepository {
     });
     return Boolean(found);
   }
+
+  /**
+   * Directed block state for a single pair, in ONE query. Returns { aBlockedB, bBlockedA } — the
+   * primitive the status endpoint/conversation overlay use to expose "blockedByMe" vs
+   * "blockedByThem" (existsBetween collapses both into one boolean and can't tell them apart).
+   */
+  async directionsBetween(a, b) {
+    const rows = await BlockModel.find({
+      $or: [
+        { blockerId: a, blockedId: b },
+        { blockerId: b, blockedId: a },
+      ],
+    }).lean();
+    let aBlockedB = false;
+    let bBlockedA = false;
+    for (const r of rows) {
+      if (String(r.blockerId) === String(a)) aBlockedB = true;
+      else bBlockedA = true;
+    }
+    return { aBlockedB, bBlockedA };
+  }
+
+  /**
+   * Batch directed block state between one caller and many others, in ONE query — used to annotate
+   * the inbox without an N+1. Returns Map<otherId, { blockedByMe, blockedByThem }>; ids absent from
+   * the map have no block in either direction. Keys are stringified other-user ids.
+   */
+  async blockedPairsFor(callerId, otherIds) {
+    const map = new Map();
+    if (!otherIds.length) return map;
+    const rows = await BlockModel.find({
+      $or: [
+        { blockerId: callerId, blockedId: { $in: otherIds } },
+        { blockedId: callerId, blockerId: { $in: otherIds } },
+      ],
+    }).lean();
+    const entry = (id) => {
+      const key = String(id);
+      let e = map.get(key);
+      if (!e) {
+        e = { blockedByMe: false, blockedByThem: false };
+        map.set(key, e);
+      }
+      return e;
+    };
+    for (const r of rows) {
+      if (String(r.blockerId) === String(callerId)) entry(r.blockedId).blockedByMe = true;
+      else entry(r.blockerId).blockedByThem = true;
+    }
+    return map;
+  }
 }
 
 export default BlockRepository;

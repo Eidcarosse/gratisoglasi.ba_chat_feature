@@ -69,9 +69,17 @@ export class ConversationService {
     });
   }
 
-  /** Inbox — uses the stored snapshot only (zero cross-DB joins). */
+  /** Inbox — uses the stored snapshot only (zero cross-DB joins), annotated with block state. */
   async listInbox(userId) {
-    return this.repo.listByParticipant(oid(userId));
+    const convos = await this.repo.listByParticipant(oid(userId));
+    // Batch the per-conversation block lookup into ONE query (no N+1).
+    const otherIds = convos.map((c) => this.#otherParticipant(c, userId)).filter(Boolean);
+    const statuses = await this.blocks.statusMap(userId, otherIds);
+    for (const convo of convos) {
+      const otherId = this.#otherParticipant(convo, userId);
+      convo.blockStatus = otherId ? statuses.get(String(otherId)) : null;
+    }
+    return convos;
   }
 
   /**
@@ -90,6 +98,9 @@ export class ConversationService {
       };
       convo.itemLive = { price: live.price, status: live.status, hidden: live.hidden };
     }
+    // Directed block state (from the caller's perspective) so the client can gate its composer.
+    const otherId = this.#otherParticipant(convo, userId);
+    convo.blockStatus = otherId ? await this.blocks.statusBetween(userId, otherId) : null;
     return convo;
   }
 
@@ -151,6 +162,12 @@ export class ConversationService {
       lastReadMessageId: lastReadMessageId ? oid(lastReadMessageId) : null,
       lastReadAt: new Date(),
     });
+  }
+
+  /** The 2-party thread's other participant id (string), or null. */
+  #otherParticipant(convo, userId) {
+    const other = convo.participantIds.map(String).find((id) => id !== String(userId));
+    return other || null;
   }
 
   async #getMemberConvo(conversationId, userId) {

@@ -218,6 +218,13 @@ interface ReadStateEntry {
   lastReadAt: string; // ISO-8601
 }
 
+interface BlockStatus {
+  // Always framed from the AUTHENTICATED caller's perspective, describing the other user.
+  blockedByMe: boolean; // you blocked them → offer "Unblock"
+  blockedByThem: boolean; // they blocked you → show "This user blocked you"
+  canMessage: boolean; // === !(blockedByMe || blockedByThem)
+}
+
 interface Conversation {
   _id: string;
   itemId: string;
@@ -236,6 +243,9 @@ interface Conversation {
   unreadCounts: Record<string, number>; // keyed by userId
   readState: Record<string, ReadStateEntry>; // keyed by userId
   mutedBy: string[]; // userIds who muted push for this convo
+  blockStatus: BlockStatus | null; // block state vs. the OTHER participant, from YOUR perspective
+                                    // (null only for a degenerate convo with no other participant).
+                                    // Present on BOTH the inbox list and GET-one. Gate the composer on it.
   createdAt: string;
   updatedAt: string; // inbox is sorted by this, desc
   // expiresAt (createdAt + 7d, TTL) and deletedFor[] also exist server-side; the inbox already
@@ -341,7 +351,7 @@ seller for a given item. If it already exists, the existing one is returned.
 > The **seller is derived from the item** server-side — you do **not** send a seller/recipient
 > id. The buyer is the authenticated user.
 
-- **201 response:** `{ "conversation": Conversation }` (shape as in §4; no `itemLive`).
+- **201 response:** `{ "conversation": Conversation }` (shape as in §4, incl. `blockStatus`; no `itemLive`).
 - **Error cases:**
   - Item does not exist → `404 NOT_FOUND`.
   - Item hidden/unavailable → `403 FORBIDDEN`.
@@ -666,10 +676,12 @@ conversations and their history stay **visible** to both users; only *sending* i
 | -------- | --------------- | ------------------------------------------------------------- |
 | `userId` | string (24-hex) | Required. The user to block. Must not be yourself; must exist. |
 
-- **201 response:** `{ "ok": true }`.
+- **201 response:** `{ "ok": true, "status": BlockStatus }` — `status` is the resulting state from
+  **your** perspective (e.g. `{ "blockedByMe": true, "blockedByThem": false, "canMessage": false }`),
+  so you can update the UI without a refetch.
 - **Error cases:** blocking yourself → `400 VALIDATION` ("You cannot block yourself"); malformed
   `userId` → `400 VALIDATION`; the target user does not exist → `404 NOT_FOUND`.
-- **No socket event** is emitted; the other user is not notified they were blocked.
+- **Socket:** a `block:update` event is emitted to **both** users (and all your other devices) — see §6.2.
 
 ### 5.13 `DELETE /blocks/:userId` — unblock a user
 
@@ -679,13 +691,16 @@ again. Idempotent — unblocking a user you had not blocked still returns `200`.
 - **Auth:** required. Only removes a block where you are the blocker.
 - **Path param:** `userId` (24-hex) — the user to unblock.
 - **Body:** none.
-- **200 response:** `{ "ok": true }`.
+- **200 response:** `{ "ok": true, "status": BlockStatus }`. Note `canMessage` is **not** guaranteed
+  `true` after unblocking — the other user may still be blocking you (`blockedByThem: true`).
 - **Error cases:** malformed `userId` → `400 VALIDATION`.
+- **Socket:** a `block:update` event is emitted to **both** users (and all your other devices).
 
 ### 5.14 `GET /blocks` — list users you have blocked
 
-Return the users **you** have blocked, newest first, each hydrated with display info. Only your
-own outgoing blocks are returned — there is no way to see who has blocked you.
+Return the users **you** have blocked, newest first, each hydrated with display info. This lists
+only your own **outgoing** blocks. To learn whether a *specific* user has blocked **you** (or the
+full bidirectional state), use `GET /blocks/status/:userId` (§5.15) or read `conversation.blockStatus`.
 
 - **Auth:** required.
 - **Query:** none.
@@ -711,7 +726,29 @@ own outgoing blocks are returned — there is no way to see who has blocked you.
 | `avatarUrl`   | string \| null | The blocked user's avatar, or `null`.                         |
 | `createdAt`   | ISO string     | When the block was created.                                   |
 
-### 5.15 Health endpoints (informational, no auth)
+### 5.15 `GET /blocks/status/:userId` — directed block status vs. one user
+
+Return the block state between you and `:userId`, framed from **your** perspective. Use this on a
+profile / item "Contact seller" screen (before any conversation exists) to decide whether to show
+"Message", "Unblock", or a "you can't contact this user" state.
+
+- **Auth:** required.
+- **Path param:** `userId` (24-hex) — the other user.
+- **200 response:**
+
+```json
+{
+  "status": { "blockedByMe": false, "blockedByThem": true, "canMessage": false }
+}
+```
+
+`status` is a `BlockStatus` (§4): `blockedByMe` (you blocked them), `blockedByThem` (they blocked
+you), `canMessage` (`= !(blockedByMe || blockedByThem)`).
+
+- **Error cases:** malformed `userId` → `400 VALIDATION`. Querying your own id or a stranger is
+  allowed and simply returns all-`false` / `canMessage: true`.
+
+### 5.16 Health endpoints (informational, no auth)
 
 | Method | Path       | Meaning                                                               |
 | ------ | ---------- | --------------------------------------------------------------------- |
@@ -886,6 +923,20 @@ You only receive this for **other** participants (never your own typing).
 
 Emitted to the conversations you share with that user when they connect/disconnect.
 
+#### `block:update` — a block between you and another user changed
+
+```json
+{ "userId": "64b2f0c2a1d4e5f600000222", "blockedByMe": true, "blockedByThem": false, "canMessage": false }
+```
+
+Emitted to **both** parties whenever a block is created (`POST /blocks`) or removed
+(`DELETE /blocks/:userId`), and to **all** of a user's connected devices (so a block made on one
+device disables the composer on the others). `userId` is the **other** user relative to you; the
+three booleans are the same `BlockStatus` shape returned by `GET /blocks/status/:userId` and
+carried on `conversation.blockStatus` (see §4, §5.14). Use it to enable/disable an already-open
+chat's composer live without a refetch: `blockedByMe` → show "Unblock"; `blockedByThem` → "This
+user blocked you"; `canMessage` → allow sending.
+
 ---
 
 ## 7. End-to-end flows
@@ -1043,8 +1094,9 @@ message` index for optimistic reconcile and dedupe of `message:new` echoes.
 | POST   | `/devices`                               | ✅          | `{ token, platform }`                                                | `201 { ok }` — register Expo push token                                           |
 | DELETE | `/devices`                               | ✅          | `{ token }`                                                          | `200 { ok }` — unregister on logout                                               |
 | GET    | `/blocks`                                | ✅          | —                                                                    | `200 { blocks:[{ userId, displayName, avatarUrl, createdAt }] }` — users I blocked |
-| POST   | `/blocks`                                | ✅          | `{ userId }`                                                         | `201 { ok }` — block a user (bidirectional; idempotent)                           |
-| DELETE | `/blocks/:userId`                        | ✅          | —                                                                    | `200 { ok }` — unblock (idempotent)                                               |
+| GET    | `/blocks/status/:userId`                 | ✅          | —                                                                    | `200 { status: BlockStatus }` — directed block state vs. one user                 |
+| POST   | `/blocks`                                | ✅          | `{ userId }`                                                         | `201 { ok, status }` — block a user (bidirectional; idempotent; emits block:update) |
+| DELETE | `/blocks/:userId`                        | ✅          | —                                                                    | `200 { ok, status }` — unblock (idempotent; emits block:update)                   |
 | GET    | `/healthz` `/readyz` `/metrics`          | —           | —                                                                    | health/metrics                                                                    |
 
 ### 10.2 Socket events
@@ -1062,6 +1114,7 @@ message` index for optimistic reconcile and dedupe of `message:new` echoes.
 | S→C       | `receipt:update`               | `{ conversationId, userId, deliveredMessageId? , lastReadMessageId? }` | —                                             |
 | S→C       | `typing`                       | `{ conversationId, userId, isTyping }`                                 | —                                             |
 | S→C       | `presence:update`              | `{ userId, status, lastSeenAt? }`                                      | —                                             |
+| S→C       | `block:update`                 | `{ userId, blockedByMe, blockedByThem, canMessage }`                   | — (block created/removed; `userId` = the other user) |
 
 ### 10.3 Validation quick rules
 
@@ -1142,14 +1195,28 @@ A new message in that conversation makes it reappear. No socket event is emitted
 **Mute.** `PATCH /conversations/:id/mute { muted }` toggles push suppression for the caller.
 Muting does **not** stop unread counts — only push. The `muted` state is per-participant.
 
-**Block.** `POST /blocks { userId }` / `DELETE /blocks/:userId` / `GET /blocks` (§5.12–5.14).
-A block is **bidirectional**: while it exists, **both** users are prevented from sending messages
-and from starting a new conversation with each other — a blocked send fails with `403 FORBIDDEN`
-on REST and acks `{ ok:false, error:{ code:"FORBIDDEN" } }` on the socket. Existing conversations
-and history stay **visible and readable** to both sides; nothing is deleted or hidden. The blocked
-user is **not** notified. `GET /blocks` returns only the blocks you created (you cannot see who
-blocked you). Client guidance: surface the `403 FORBIDDEN` on send as a "you can't message this
-user" state and disable the composer; refresh block state from `GET /blocks`.
+**Block.** `POST /blocks { userId }` / `DELETE /blocks/:userId` / `GET /blocks` /
+`GET /blocks/status/:userId` (§5.12–5.15). A block is **bidirectional**: while it exists, **both**
+users are prevented from sending messages and from starting a new conversation with each other —
+a blocked send fails with `403 FORBIDDEN` on REST and acks `{ ok:false, error:{ code:"FORBIDDEN" } }`
+on the socket. Existing conversations and history stay **visible and readable** to both sides;
+nothing is deleted or hidden.
+
+**Reading block state (do this instead of parsing the 403).** Every payload exposes a caller-relative
+`BlockStatus` — `{ blockedByMe, blockedByThem, canMessage }` (§4):
+- `conversation.blockStatus` is present on the inbox (`GET /conversations`) and on open
+  (`GET /conversations/:id`), so a thread knows on load whether contact is possible.
+- `GET /blocks/status/:userId` gives the same for an arbitrary user (e.g. a profile / "Contact
+  seller" screen where no conversation exists yet).
+- `POST`/`DELETE /blocks` echo the resulting `status`, and a `block:update` socket event fires to
+  **both** parties (and all your devices) so an already-open chat updates live.
+
+Client guidance: gate the composer on `blockStatus` — `blockedByMe` → show "Unblock" + a "you
+blocked this user" banner; `blockedByThem` → disable the composer with "This user blocked you";
+`canMessage` → allow sending. Subscribe to `block:update` to react live, and still treat a
+`403 FORBIDDEN` on send as a defensive fallback. Note this **intentionally reveals** when the other
+user has blocked you (via `blockedByThem`), unlike `GET /blocks`, which lists only your own
+outgoing blocks.
 
 ### 10.6 Source-of-truth files (server)
 

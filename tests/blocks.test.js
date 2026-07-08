@@ -70,7 +70,9 @@ describe('block prevents contact both ways', () => {
   it('buyer blocks seller (201) and it appears in the blocked list', async () => {
     const b = await request(app).post('/blocks').set(auth(buyerId)).send({ userId: String(sellerId) });
     expect(b.status).toBe(201);
-    expect(b.body).toEqual({ ok: true });
+    expect(b.body.ok).toBe(true);
+    // The block response echoes the resulting directed status (from the blocker's perspective).
+    expect(b.body.status).toEqual({ blockedByMe: true, blockedByThem: false, canMessage: false });
 
     const list = await request(app).get('/blocks').set(auth(buyerId));
     expect(list.status).toBe(200);
@@ -119,7 +121,9 @@ describe('unblock restores contact', () => {
   it('unblocks (200) and clears the blocked list', async () => {
     const u = await request(app).delete(`/blocks/${sellerId}`).set(auth(buyerId));
     expect(u.status).toBe(200);
-    expect(u.body).toEqual({ ok: true });
+    expect(u.body.ok).toBe(true);
+    // No reverse block stands, so contact is restored.
+    expect(u.body.status).toEqual({ blockedByMe: false, blockedByThem: false, canMessage: true });
 
     const list = await request(app).get('/blocks').set(auth(buyerId));
     expect(list.body.blocks).toHaveLength(0);
@@ -135,6 +139,53 @@ describe('unblock restores contact', () => {
   it('is idempotent — unblocking a non-blocked user still returns 200', async () => {
     const u = await request(app).delete(`/blocks/${sellerId}`).set(auth(buyerId));
     expect(u.status).toBe(200);
-    expect(u.body).toEqual({ ok: true });
+    expect(u.body.ok).toBe(true);
+    expect(u.body.status.canMessage).toBe(true);
+  });
+});
+
+describe('block status is exposed both directions', () => {
+  it('GET /blocks/status/:userId reflects each side after buyer blocks seller', async () => {
+    await request(app).post('/blocks').set(auth(buyerId)).send({ userId: String(sellerId) });
+
+    // Blocker's view: "I blocked them".
+    const asBuyer = await request(app).get(`/blocks/status/${sellerId}`).set(auth(buyerId));
+    expect(asBuyer.status).toBe(200);
+    expect(asBuyer.body.status).toEqual({
+      blockedByMe: true,
+      blockedByThem: false,
+      canMessage: false,
+    });
+
+    // Blocked user's view: "they blocked me" (the mirror image).
+    const asSeller = await request(app).get(`/blocks/status/${buyerId}`).set(auth(sellerId));
+    expect(asSeller.body.status).toEqual({
+      blockedByMe: false,
+      blockedByThem: true,
+      canMessage: false,
+    });
+  });
+
+  it('open + inbox carry the caller-relative blockStatus while blocked', async () => {
+    const open = await request(app).get(`/conversations/${convoId}`).set(auth(sellerId));
+    expect(open.status).toBe(200);
+    expect(open.body.conversation.blockStatus).toEqual({
+      blockedByMe: false,
+      blockedByThem: true,
+      canMessage: false,
+    });
+
+    const inbox = await request(app).get('/conversations').set(auth(buyerId));
+    const row = inbox.body.conversations.find((c) => c._id === convoId);
+    expect(row.blockStatus).toEqual({ blockedByMe: true, blockedByThem: false, canMessage: false });
+  });
+
+  it('reports canMessage:true once unblocked', async () => {
+    await request(app).delete(`/blocks/${sellerId}`).set(auth(buyerId));
+    const s = await request(app).get(`/blocks/status/${sellerId}`).set(auth(buyerId));
+    expect(s.body.status).toEqual({ blockedByMe: false, blockedByThem: false, canMessage: true });
+
+    const open = await request(app).get(`/conversations/${convoId}`).set(auth(buyerId));
+    expect(open.body.conversation.blockStatus.canMessage).toBe(true);
   });
 });
