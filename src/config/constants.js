@@ -34,9 +34,9 @@ export const LIMITS = Object.freeze({
   // At most this many conversations per conversation:sync request — caps the fan-out of DB
   // queries a single reconnect can trigger.
   MAX_SYNC_CONVERSATIONS: 50,
-  // Conversations and their messages auto-delete this many days AFTER the conversation's
-  // creation (fixed window, not rolling) via a MongoDB TTL index on `expiresAt`.
-  CHAT_TTL_DAYS: 7,
+  // Each message auto-deletes this many days after it was sent. A conversation's expiry follows
+  // its newest message, so the conversation remains available while it has any unexpired message.
+  CHAT_TTL_DAYS: 30,
 });
 
 // Rate-limit windows/caps (in-memory now → Redis later). New-conversation creation is throttled

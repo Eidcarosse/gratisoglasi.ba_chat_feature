@@ -73,7 +73,7 @@ describe('push notifications', () => {
 
     await sendAs(buyerId, { clientMessageId: randomUUID(), type: 'text', body: 'Hello there' });
 
-    expect(lastMessages).toBeTruthy();
+    await vi.waitFor(() => expect(lastMessages).toBeTruthy(), { timeout: 2000 });
     expect(lastMessages[0].title).toBe('B Uyer'); // sender displayName
     expect(lastMessages[0].body).toBe('Hello there');
     expect(lastMessages[0].data.conversationId).toBe(convoId);
@@ -89,14 +89,15 @@ describe('push notifications', () => {
       type: 'image',
       attachments: [{ key: 'k', url: 'https://cdn/x.jpg', mime: 'image/jpeg', size: 10 }],
     });
-    expect(lastMessages[0].body).toBe('📷 Photo');
+    await vi.waitFor(() => expect(lastMessages?.[0]?.body).toBe('📷 Photo'), { timeout: 2000 });
   });
 
   it('pushes even when the recipient is online (backgrounded apps keep sockets connected)', async () => {
     await ctx.container.presenceService.online(String(sellerId), 'sock-1');
     await sendAs(buyerId, { clientMessageId: randomUUID(), type: 'text', body: 'online test' });
-    expect(lastMessages).toBeTruthy();
-    expect(lastMessages[0].body).toBe('online test');
+    await vi.waitFor(() => expect(lastMessages?.[0]?.body).toBe('online test'), {
+      timeout: 2000,
+    });
     await ctx.container.presenceService.offline(String(sellerId), 'sock-1');
   });
 

@@ -19,13 +19,23 @@ export class ConversationService {
   /**
    * @param {object} deps
    * @param {import('./conversation.repository.js').ConversationRepository} deps.conversationRepository
+   * @param {import('../messages/message.repository.interface.js').IMessageRepository} deps.messageRepository
    * @param {import('../../integrations/gratis/gratis.service.js').GratisService} deps.gratisService
    * @param {import('../blocks/block.service.js').BlockService} deps.blockService
+   * @param {import('../../common/mongo.transaction.js').MongoTransactionRunner} deps.transactionRunner
    */
-  constructor({ conversationRepository, gratisService, blockService }) {
+  constructor({
+    conversationRepository,
+    messageRepository,
+    gratisService,
+    blockService,
+    transactionRunner,
+  }) {
     this.repo = conversationRepository;
+    this.messages = messageRepository;
     this.gratis = gratisService;
     this.blocks = blockService;
+    this.transactions = transactionRunner;
   }
 
   /**
@@ -64,7 +74,7 @@ export class ConversationService {
         sellerId: oid(sellerId),
       },
       participants,
-      // Fixed 7-day-since-creation TTL window (only stamped on insert; never extended).
+      // An empty conversation gets one retention window; each new message moves this deadline.
       expiresAt: new Date(Date.now() + CHAT_TTL_MS),
     });
   }
@@ -105,16 +115,16 @@ export class ConversationService {
   }
 
   /** Used by messageService to authorize a sender and read participant ids. Throws if not a member. */
-  async getMemberConversation(conversationId, userId) {
-    return this.#getMemberConvo(conversationId, userId);
+  async getMemberConversation(conversationId, userId, { session } = {}) {
+    return this.#getMemberConvo(conversationId, userId, { session });
   }
 
   /** Update the inbox snapshot after a message is persisted (called by messageService). */
-  async recordMessage(convo, message) {
+  async recordMessage(convo, message, { session } = {}) {
     const recipientIds = convo.participantIds
       .map(String)
       .filter((id) => id !== String(message.senderId));
-    return this.repo.applyNewMessage({
+    const updated = await this.repo.applyNewMessage({
       conversationId: convo._id,
       lastMessage: {
         messageId: message._id,
@@ -124,10 +134,16 @@ export class ConversationService {
         createdAt: message.createdAt,
         deletedAt: null,
       },
+      expiresAt: message.expiresAt,
       recipientIds,
       // Any new message resurfaces the (2-party) thread for whoever hid it. ObjectIds, not strings.
       resurfaceFor: convo.participantIds,
+      session,
     });
+    // A concurrent final delete may remove the conversation after the transaction's initial read.
+    // Abort the surrounding transaction so the inserted message cannot become an orphan.
+    if (!updated) throw AppError.notFound('Conversation not found');
+    return updated;
   }
 
   /** Replace ONLY the inbox preview (used after an unsend recompute). Caller already authorized. */
@@ -142,9 +158,32 @@ export class ConversationService {
    * after it, so pre-delete messages stay hidden even after the thread resurfaces on a new message.
    */
   async hideForUser(conversationId, userId) {
-    const convo = await this.#getMemberConvo(conversationId, userId);
-    const clearedMessageId = convo.lastMessage?.messageId ?? null;
-    return this.repo.hideForUser(oid(conversationId), oid(userId), clearedMessageId);
+    return this.transactions.run(async (session) => {
+      const convo = await this.#getMemberConvo(conversationId, userId, { session });
+      const clearedMessageId = convo.lastMessage?.messageId ?? null;
+      const updated = await this.repo.hideForUser(
+        oid(conversationId),
+        oid(userId),
+        clearedMessageId,
+        { session },
+      );
+
+      if (!updated) throw AppError.notFound('Conversation not found');
+
+      // Once both participants have cleared the thread, nobody can see its messages anymore.
+      // Keep the conversation and its message partition in the same transaction so a failure or a
+      // concurrent send cannot leave either half of the deleted thread behind.
+      if (updated.deletedFor.length === updated.participantIds.length) {
+        const removed = await this.repo.deleteIfHiddenForAll(
+          oid(conversationId),
+          updated.participantIds,
+          { session },
+        );
+        if (removed) await this.messages.deleteByConversation(oid(conversationId), { session });
+      }
+
+      return updated;
+    });
   }
 
   /** Mute/unmute push for the caller on this conversation (membership-guarded). */
@@ -170,10 +209,10 @@ export class ConversationService {
     return other || null;
   }
 
-  async #getMemberConvo(conversationId, userId) {
+  async #getMemberConvo(conversationId, userId, { session } = {}) {
     if (!mongoose.Types.ObjectId.isValid(conversationId))
       throw AppError.notFound('Conversation not found');
-    const convo = await this.repo.getById(conversationId);
+    const convo = await this.repo.getById(conversationId, { session });
     if (!convo) throw AppError.notFound('Conversation not found');
     if (!isMember(convo, userId))
       throw AppError.forbidden('Not a participant of this conversation');

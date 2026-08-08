@@ -21,16 +21,18 @@ function maxObjectId(a, b) {
 
 export class MongoMessageRepository extends IMessageRepository {
   /** Idempotent insert. Returns { message, created } — created=false on a dedup hit. */
-  async append(message) {
+  async append(message, { session } = {}) {
     const filter = {
       conversationId: message.conversationId,
       clientMessageId: message.clientMessageId,
     };
-    const res = await MessageModel.findOneAndUpdate(
+    const query = MessageModel.findOneAndUpdate(
       filter,
       { $setOnInsert: message },
       { upsert: true, new: true, setDefaultsOnInsert: true, includeResultMetadata: true },
     );
+    if (session) query.session(session);
+    const res = await query;
     const created = !res.lastErrorObject?.updatedExisting;
     return { message: res.value.toObject(), created };
   }
@@ -69,6 +71,12 @@ export class MongoMessageRepository extends IMessageRepository {
       { $set: { deletedAt: new Date(), body: '', attachments: [] } },
       { new: true },
     ).lean();
+  }
+
+  async deleteByConversation(conversationId, { session } = {}) {
+    const query = MessageModel.deleteMany({ conversationId });
+    if (session) query.session(session);
+    return query;
   }
 }
 

@@ -45,8 +45,7 @@ const messageSchema = new mongoose.Schema(
     deletedAt: { type: Date, default: null },
     // createdAt is set explicitly (not via timestamps) so it aligns with the _id ordering key.
     createdAt: { type: Date, default: Date.now },
-    // TTL: aligned to the conversation's createdAt + CHAT_TTL_DAYS so the whole thread expires
-    // together (Mongo TTL can't cascade across collections).
+    // TTL: each message expires CHAT_TTL_DAYS after its own createdAt.
     expiresAt: { type: Date },
   },
   { versionKey: false },

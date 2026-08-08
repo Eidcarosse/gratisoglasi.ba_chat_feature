@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterAll, vi } from 'vitest';
 import request from 'supertest';
 import { randomUUID } from 'node:crypto';
 import { bootTestApp, seedUser, seedItem } from './helpers/app.js';
@@ -60,7 +60,7 @@ beforeEach(() => {
 describe('mute conversation (suppresses push only)', () => {
   it('pushes to an offline recipient by default', async () => {
     await sendText('hi');
-    expect(pushCalls.length).toBe(1);
+    await vi.waitFor(() => expect(pushCalls.length).toBe(1), { timeout: 2000 });
   });
 
   it('suppresses push when the recipient muted the conversation', async () => {
@@ -81,6 +81,6 @@ describe('mute conversation (suppresses push only)', () => {
       .send({ muted: false });
 
     await sendText('back again');
-    expect(pushCalls.length).toBe(1);
+    await vi.waitFor(() => expect(pushCalls.length).toBe(1), { timeout: 2000 });
   });
 });

@@ -16,6 +16,7 @@
  */
 import { config } from '../config/index.js';
 import { logger } from '../common/logger.js';
+import { MongoTransactionRunner } from '../common/mongo.transaction.js';
 import { rateLimit } from '../common/middleware/rateLimit.js';
 import { RATE_LIMITS } from '../config/constants.js';
 
@@ -51,7 +52,9 @@ import { UploadService } from '../modules/uploads/upload.service.js';
 
 import { Gateway } from '../realtime/gateway.js';
 
-export function buildContainer({ gratisConn }) {
+export function buildContainer({ chatConn, gratisConn }) {
+  const transactionRunner = new MongoTransactionRunner(chatConn);
+
   // --- Auth verifier seam ---
   const authVerifier =
     config.AUTH_MODE === 'jwt' ? new JwtVerifier(config.JWT_SECRET) : new DevVerifier();
@@ -74,14 +77,6 @@ export function buildContainer({ gratisConn }) {
   const blockRepository = new BlockRepository();
   const blockService = new BlockService({ blockRepository, gratisService, gateway });
 
-  // --- Conversations ---
-  const conversationRepository = new ConversationRepository();
-  const conversationService = new ConversationService({
-    conversationRepository,
-    gratisService,
-    blockService,
-  });
-
   // --- Message store seam ---
   let messageRepository;
   if (config.MESSAGE_STORE === 'scylla') {
@@ -91,6 +86,16 @@ export function buildContainer({ gratisConn }) {
   } else {
     messageRepository = new MongoMessageRepository();
   }
+
+  // --- Conversations ---
+  const conversationRepository = new ConversationRepository();
+  const conversationService = new ConversationService({
+    conversationRepository,
+    messageRepository,
+    gratisService,
+    blockService,
+    transactionRunner,
+  });
 
   // --- Presence (memory store today) ---
   const presenceStore = new MemoryPresenceStore();
@@ -122,6 +127,7 @@ export function buildContainer({ gratisConn }) {
     presenceService,
     uploadService,
     blockService,
+    transactionRunner,
   });
 
   logger.info(

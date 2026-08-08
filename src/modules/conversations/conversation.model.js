@@ -16,7 +16,7 @@
  *   clearedAt       -> { <userId>: messageId } history watermark set on delete; reads return only
  *                      messages after it (pre-delete messages stay hidden even after resurface)
  *   mutedBy         -> [userId] who muted push for this convo (unread still increments)
- *   expiresAt       -> createdAt + CHAT_TTL_DAYS; TTL index auto-deletes the convo (+messages)
+ *   expiresAt       -> newest message expiry (or creation + CHAT_TTL_DAYS while empty)
  *
  * NO messages array (unbounded-array anti-pattern) — messages are their own collection.
  *
@@ -83,8 +83,9 @@ const conversationSchema = new mongoose.Schema(
     clearedAt: { type: mongoose.Schema.Types.Mixed, default: {} },
     // Per-participant mute: userIds here receive no PUSH for new messages (unread still counts).
     mutedBy: { type: [mongoose.Schema.Types.ObjectId], default: [] },
-    // TTL: set once at creation = createdAt + CHAT_TTL_DAYS. Messages carry the same instant so
-    // the whole thread expires together. Mongo's TTL monitor sweeps ~every 60s.
+    // TTL: initially creation + CHAT_TTL_DAYS, then moved to each new message's expiry. Older
+    // messages expire first, so this cannot expire while any message is younger than retention.
+    // Mongo's TTL monitor sweeps approximately every 60 seconds.
     expiresAt: { type: Date },
   },
   { timestamps: true, minimize: false },

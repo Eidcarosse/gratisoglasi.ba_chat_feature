@@ -4,14 +4,15 @@
  * topology without a real Atlas cluster. Env is set BEFORE importing config so the dynamic import
  * of the loaders picks up the test URIs.
  */
-import { MongoMemoryServer } from 'mongodb-memory-server';
+import { MongoMemoryReplSet } from 'mongodb-memory-server';
 import mongoose from 'mongoose';
 
 export async function bootTestApp({ authMode = 'dev', jwtSecret } = {}) {
-  const mongod = await MongoMemoryServer.create();
-  const base = mongod.getUri(); // mongodb://127.0.0.1:port/
-  const chatUri = `${base}GratisChat`;
-  const gratisUri = `${base}Gratis`;
+  // Transactions are part of the production write path, so tests must use a replica set rather
+  // than a standalone in-memory mongod.
+  const mongod = await MongoMemoryReplSet.create({ replSet: { count: 1 } });
+  const chatUri = mongod.getUri('GratisChat');
+  const gratisUri = mongod.getUri('Gratis');
 
   process.env.NODE_ENV = 'test';
   process.env.LOG_LEVEL = process.env.LOG_LEVEL || 'silent';

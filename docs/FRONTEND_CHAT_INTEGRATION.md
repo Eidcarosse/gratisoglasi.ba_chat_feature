@@ -248,7 +248,8 @@ interface Conversation {
                                     // Present on BOTH the inbox list and GET-one. Gate the composer on it.
   createdAt: string;
   updatedAt: string; // inbox is sorted by this, desc
-  // expiresAt (createdAt + 7d, TTL) and deletedFor[] also exist server-side; the inbox already
+  // expiresAt (newest message expiry, or creation + 30d when empty) and deletedFor[] also exist
+  // server-side; the inbox already
   // omits conversations YOU deleted, so deletedFor is not something the client needs to read.
 
   // Present ONLY on GET /conversations/:id (live overlay; not stored):
@@ -576,7 +577,9 @@ it has accepted and processed the image — so when this call succeeds, the imag
 
 Hide a conversation from **your own** inbox. Per-participant: the other participant is unaffected
 and still sees the thread and its full history. Your unread badge for it is reset to 0. A **new
-message** in that conversation makes it reappear in your inbox automatically.
+message** in that conversation makes it reappear in your inbox automatically. Once both
+participants delete the conversation, the server permanently removes the conversation and all of
+its messages.
 
 - **Auth:** required. Must be a participant, else `403 FORBIDDEN`.
 - **Path param:** `conversationId` (24-hex).

@@ -10,7 +10,7 @@
 /* eslint-disable no-unused-vars */
 export class IMessageRepository {
   // Idempotent on (conversationId, clientMessageId). Returns { message, created }.
-  async append(message) {
+  async append(message, { session } = {}) {
     throw new Error('not implemented');
   }
   // Keyset pagination, newest-first.
@@ -26,6 +26,10 @@ export class IMessageRepository {
   // Unsend for everyone: tombstone the message (set deletedAt, clear body+attachments). Returns
   // the updated doc, or null if not found. Idempotency/authorization live in the service.
   async softDelete(conversationId, messageId) {
+    throw new Error('not implemented');
+  }
+  // Permanently remove the message partition when its conversation no longer exists.
+  async deleteByConversation(conversationId, { session } = {}) {
     throw new Error('not implemented');
   }
 }

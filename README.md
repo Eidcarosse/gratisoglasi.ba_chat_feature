@@ -87,8 +87,13 @@ npm test                 # vitest + supertest + in-memory mongo (no Atlas needed
 | `CLOUDFLARE_ACCOUNT_ID` · `CLOUDFLARE_IMAGES_TOKEN` | for uploads | Cloudflare Images creds. The `/uploads/direct-upload` route 503s if either is unset. |
 | `CLOUDFLARE_IMAGES_VARIANT` | — | Delivery-URL variant clients should prefer (default `public`). |
 
-> Locally you can point both URIs at one mongod with two DB names
+> Locally, run a single-node replica-set mongod and point both URIs at it with two DB names
 > (`mongodb://localhost:27017/GratisChat` and `…/Gratis`) — that exercises the two-connection seam.
+> The chat database must run as a replica set (or a sharded cluster) because message sends and
+> conversation deletion use MongoDB transactions. Managed Mongo deployments already provide this;
+> a local standalone mongod is not sufficient for those write paths.
+> On startup, an idempotent migration also converts legacy 7-day absolute deadlines to the current
+> per-message 30-day policy before the service accepts traffic.
 
 Identity for requests: `Authorization: Bearer <token>` (REST) and `socket.handshake.auth.token`
 (ws). Under `AUTH_MODE=dev` the token is just the main-site `userId`.
@@ -107,7 +112,7 @@ Health checks: `GET /healthz` (liveness, no DB) · `GET /readyz` (BOTH Mongo con
 > **Status:** Implemented end-to-end (loaders, two-connection DB, gratis read-only integration,
 > auth verifier seam, conversations with snapshots, messages + keyset history, realtime gateway,
 > presence, typing, uploads, receipts, **unsend (delete-for-everyone), delete-conversation
-> (hide-for-me), mute, Expo push notifications + device registration, and a 7-day TTL that
+> (hide-for-me), mute, Expo push notifications + device registration, and a 30-day TTL that
 > auto-deletes conversations and their messages**) with integration tests (`npm test`).
 > The ScyllaDB message repo and Redis presence store remain header-only placeholders behind their
 > existing seams.

@@ -4,8 +4,9 @@
  * index), listByParticipant (inbox, sorted by updatedAt), getById, and atomic inbox-snapshot
  * updates. The only place conversation documents are read/written. Must NOT hold business logic.
  *
- * SEAM 2: the inbox-update methods use TARGETED $set/$inc on lastMessage / unreadCounts /
- * readState / updatedAt only — they must never clobber the item/participants snapshot fields.
+ * SEAM 2: the inbox-update methods use TARGETED $set/$inc/$max on lastMessage / unreadCounts /
+ * expiresAt / readState / updatedAt only — they must never clobber the item/participants snapshot
+ * fields.
  */
 import { ConversationModel } from './conversation.model.js';
 
@@ -26,15 +27,17 @@ export class ConversationRepository {
           participants,
           unreadCounts: {},
           readState: {},
-          expiresAt, // fixed TTL window, set only at creation
+          expiresAt, // empty conversations expire after the retention window
         },
       },
       { upsert: true, new: true, setDefaultsOnInsert: true },
     ).lean();
   }
 
-  async getById(id) {
-    return ConversationModel.findById(id).lean();
+  async getById(id, { session } = {}) {
+    const query = ConversationModel.findById(id);
+    if (session) query.session(session);
+    return query.lean();
   }
 
   async listByParticipant(userId, { limit = 50 } = {}) {
@@ -51,16 +54,29 @@ export class ConversationRepository {
    * (`$pull` from deletedFor). `resurfaceFor` MUST be ObjectIds (deletedFor stores ObjectIds);
    * `recipientIds` are strings (unread map keys). Never touches item/participants.
    */
-  async applyNewMessage({ conversationId, lastMessage, recipientIds, resurfaceFor = [] }) {
+  async applyNewMessage({
+    conversationId,
+    lastMessage,
+    expiresAt,
+    recipientIds,
+    resurfaceFor = [],
+    session,
+  }) {
     const inc = {};
     for (const rid of recipientIds) inc[`unreadCounts.${rid}`] = 1;
-    const update = { $set: { lastMessage } };
+    // Keep the conversation until its newest message expires. Since every older message expires
+    // no later than this instant, the conversation TTL cannot remove a thread with an unexpired
+    // message. $max is important here: concurrent out-of-order writes must never move the
+    // conversation deadline backward.
+    const update = { $set: { lastMessage }, $max: { expiresAt } };
     if (Object.keys(inc).length) update.$inc = inc;
     if (resurfaceFor.length) update.$pull = { deletedFor: { $in: resurfaceFor } };
-    return ConversationModel.findByIdAndUpdate(conversationId, update, {
+    const query = ConversationModel.findByIdAndUpdate(conversationId, update, {
       new: true,
       timestamps: true,
     }).lean();
+    if (session) query.session(session);
+    return query;
   }
 
   /**
@@ -81,8 +97,8 @@ export class ConversationRepository {
    * reads return only messages AFTER it. `clearedMessageId` may be null (empty thread → nothing to
    * hide). The watermark lives outside `deletedFor`, so the resurface `$pull` never clears it.
    */
-  async hideForUser(conversationId, userId, clearedMessageId = null) {
-    return ConversationModel.findByIdAndUpdate(
+  async hideForUser(conversationId, userId, clearedMessageId = null, { session } = {}) {
+    const query = ConversationModel.findByIdAndUpdate(
       conversationId,
       {
         $addToSet: { deletedFor: userId },
@@ -92,7 +108,19 @@ export class ConversationRepository {
         },
       },
       { new: true },
-    ).lean();
+    );
+    if (session) query.session(session);
+    return query.lean();
+  }
+
+  /** Permanently remove a thread, but only after every participant has hidden it. */
+  async deleteIfHiddenForAll(conversationId, participantIds, { session } = {}) {
+    const query = ConversationModel.findOneAndDelete({
+      _id: conversationId,
+      deletedFor: { $all: participantIds, $size: participantIds.length },
+    });
+    if (session) query.session(session);
+    return query.lean();
   }
 
   /** Mute/unmute push for this user on this conversation (does not affect unread counts). */

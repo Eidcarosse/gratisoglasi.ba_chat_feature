@@ -9,6 +9,7 @@
 import http from 'node:http';
 import { connectDatabases } from './db.js';
 import { buildContainer, syncChatIndexes } from './container.js';
+import { migrateChatRetention } from './chat.migrations.js';
 import { createExpressApp } from './express.js';
 import { attachSocket } from './socket.js';
 import { logger } from '../common/logger.js';
@@ -16,6 +17,8 @@ import { logger } from '../common/logger.js';
 export async function bootstrap() {
   // config/index.js validated env at import time (fail-fast); reaching here means it's valid.
   const conns = await connectDatabases();
+  // Backfill legacy absolute TTL dates before HTTP/socket traffic can observe the old policy.
+  await migrateChatRetention();
   const container = buildContainer(conns);
   await syncChatIndexes(container); // build the unique {itemId, participantIds} index etc.
   const app = createExpressApp(container);

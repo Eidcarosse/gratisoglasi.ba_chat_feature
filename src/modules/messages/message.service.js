@@ -1,9 +1,9 @@
 /**
  * Layer: Service — the single write path for messages.
  * send(): authorize (sender ∈ conversation.participantIds via conversationService), sanitize body,
- * messageRepository.append() (idempotent), then — only on a genuinely new message — update the
- * conversation inbox snapshot via conversationService, emit message:new through the gateway, and
- * push-notify all non-muted recipients. Idempotent append + client dedup = feels exactly-once.
+ * transactionally append the message and update the conversation inbox snapshot, then — only on a
+ * committed genuinely new message — emit message:new through the gateway and push-notify all
+ * non-muted recipients. Idempotent append + client dedup = feels exactly-once.
  * history(): keyset pagination. syncSince(): messages newer than a client cursor.
  * Depends on IMessageRepository (NOT a concrete store), conversationService, gateway,
  * notificationService, presenceService — all injected. Must NOT touch any DB driver directly.
@@ -32,6 +32,7 @@ export class MessageService {
     presenceService,
     uploadService,
     blockService,
+    transactionRunner,
   }) {
     this.repo = messageRepository;
     this.conversations = conversationService;
@@ -40,50 +41,68 @@ export class MessageService {
     this.presence = presenceService;
     this.uploads = uploadService;
     this.blocks = blockService;
+    this.transactions = transactionRunner;
   }
 
   async send({ conversationId, senderId, clientMessageId, type, body, attachments = [] }) {
-    // Authorize: membership is the real guard (identity is spoofable under dev-trust).
-    const convo = await this.conversations.getMemberConversation(conversationId, senderId);
+    const result = await this.transactions.run(async (session) => {
+      // Authorize: membership is the real guard (identity is spoofable under dev-trust). Read the
+      // conversation in this same transaction as the append/update so a concurrent final delete
+      // cannot invalidate the send between authorization and persistence.
+      const convo = await this.conversations.getMemberConversation(conversationId, senderId, {
+        session,
+      });
 
-    // A block in either direction bars messaging between the two participants (covers both the
-    // REST controller and the message:send socket handler, which share this single write path).
-    const recipientId = convo.participantIds.map(String).find((id) => id !== String(senderId));
-    if (recipientId && (await this.blocks.isBlockedBetween(senderId, recipientId))) {
-      throw AppError.forbidden('You cannot message this user');
-    }
+      // A block in either direction bars messaging between the two participants (covers both the
+      // REST controller and the message:send socket handler, which share this single write path).
+      const recipientId = convo.participantIds.map(String).find((id) => id !== String(senderId));
+      if (recipientId && (await this.blocks.isBlockedBetween(senderId, recipientId))) {
+        throw AppError.forbidden('You cannot message this user');
+      }
 
-    const doc = {
-      conversationId: oid(conversationId),
-      senderId: oid(senderId),
-      clientMessageId,
-      type,
-      body: type === 'text' ? sanitizeBody(body) : (body ?? ''),
-      attachments,
-      createdAt: new Date(),
-      // Align expiry to the conversation's creation so the whole thread TTL-expires together.
-      expiresAt: new Date(new Date(convo.createdAt).getTime() + CHAT_TTL_MS),
-    };
+      const createdAt = new Date();
+      const doc = {
+        conversationId: oid(conversationId),
+        senderId: oid(senderId),
+        clientMessageId,
+        type,
+        body: type === 'text' ? sanitizeBody(body) : (body ?? ''),
+        attachments,
+        createdAt,
+        // Messages age out independently, 30 days after they were actually sent.
+        expiresAt: new Date(createdAt.getTime() + CHAT_TTL_MS),
+      };
 
-    const { message, created } = await this.repo.append(doc);
+      const { message, created } = await this.repo.append(doc, { session });
 
-    // Idempotent: a resend (same clientMessageId) returns the canonical copy without re-emitting
-    // or re-incrementing unread counts.
-    if (created) {
-      // Realtime first — online clients see the message immediately.
-      this.gateway.emitToConversation(conversationId, EVENTS.MESSAGE_NEW, { message });
-      this.gateway.emitToUser(senderId, EVENTS.MESSAGE_NEW, { message });
+      // Idempotent: a resend (same clientMessageId) returns the canonical copy without re-emitting
+      // or re-incrementing unread counts.
+      if (created) await this.conversations.recordMessage(convo, message, { session });
 
-      // Fire push immediately (don't block on inbox DB writes or Expo round-trips). A backgrounded
-      // app keeps its socket alive, so presence can't tell whether the app is visible — push every
-      // non-muted recipient and let the client's foreground handler suppress in-app banners.
-      this.dispatchMessagePush({ convo, conversationId, message, senderId });
+      return { convo, message, created };
+    });
 
-      await this.conversations.recordMessage(convo, message);
+    // External side effects happen only after the transaction commits. This keeps transaction
+    // retries from duplicating realtime events or push notifications.
+    if (result.created) {
+      this.gateway.emitToConversation(conversationId, EVENTS.MESSAGE_NEW, {
+        message: result.message,
+      });
+      this.gateway.emitToUser(senderId, EVENTS.MESSAGE_NEW, { message: result.message });
+
+      // A backgrounded app keeps its socket alive, so presence can't tell whether the app is
+      // visible — push every non-muted recipient and let the client's foreground handler suppress
+      // in-app banners.
+      this.dispatchMessagePush({
+        convo: result.convo,
+        conversationId,
+        message: result.message,
+        senderId,
+      });
       messagesSent.inc();
     }
 
-    return message;
+    return result.message;
   }
 
   /**
