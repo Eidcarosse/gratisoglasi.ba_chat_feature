@@ -134,6 +134,34 @@ describe('delete conversation (hide for me)', () => {
     })).toBe(0);
   });
 
+  it('keeps an empty conversation after both participants delete it', async () => {
+    const buyerEmpty = await seedUser(ctx, { firstname: 'E', lastname: 'Mpty', email: 'empty@e.com' });
+    const itemEmpty = await seedItem(ctx, {
+      addedBy: sellerId,
+      title: 'Empty room item',
+      images: [],
+      hidden: false,
+      status: 'Approved',
+    });
+    const c = await request(app)
+      .post('/conversations')
+      .set(auth(buyerEmpty))
+      .send({ itemId: String(itemEmpty) });
+    const id = c.body.conversation._id;
+
+    expect((await request(app).delete(`/conversations/${id}`).set(auth(buyerEmpty))).status).toBe(200);
+    expect((await request(app).delete(`/conversations/${id}`).set(auth(sellerId))).status).toBe(200);
+
+    const conversation = await mongoose.connection.collection('conversations').findOne({
+      _id: new mongoose.Types.ObjectId(id),
+    });
+    expect(conversation).toBeTruthy();
+    expect(conversation.lastMessage).toBeNull();
+    expect(await mongoose.connection.collection('messages').countDocuments({
+      conversationId: new mongoose.Types.ObjectId(id),
+    })).toBe(0);
+  });
+
   it('does not leave an orphan message when a send overlaps final deletion', async () => {
     const buyer4 = await seedUser(ctx, { firstname: 'R', lastname: 'Ace', email: 'race@e.com' });
     const item4 = await seedItem(ctx, {

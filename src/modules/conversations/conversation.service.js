@@ -170,10 +170,15 @@ export class ConversationService {
 
       if (!updated) throw AppError.notFound('Conversation not found');
 
-      // Once both participants have cleared the thread, nobody can see its messages anymore.
-      // Keep the conversation and its message partition in the same transaction so a failure or a
-      // concurrent send cannot leave either half of the deleted thread behind.
-      if (updated.deletedFor.length === updated.participantIds.length) {
+      // Once both participants have cleared a message-bearing thread, nobody can see its messages
+      // anymore. Keep the conversation and its message partition in the same transaction so a
+      // failure or a concurrent send cannot leave either half of the deleted thread behind. Empty
+      // conversations are intentionally retained so they can be reused if either participant
+      // starts messaging later.
+      if (
+        updated.lastMessage?.messageId &&
+        updated.deletedFor.length === updated.participantIds.length
+      ) {
         const removed = await this.repo.deleteIfHiddenForAll(
           oid(conversationId),
           updated.participantIds,
