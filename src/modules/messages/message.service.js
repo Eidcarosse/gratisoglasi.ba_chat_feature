@@ -85,9 +85,12 @@ export class MessageService {
     // External side effects happen only after the transaction commits. This keeps transaction
     // retries from duplicating realtime events or push notifications.
     if (result.created) {
-      this.gateway.emitToConversation(conversationId, EVENTS.MESSAGE_NEW, {
-        message: result.message,
-      });
+      this.gateway.emitToConversation(
+        conversationId,
+        EVENTS.MESSAGE_NEW,
+        { message: result.message },
+        { excludeUserId: senderId },
+      );
       this.gateway.emitToUser(senderId, EVENTS.MESSAGE_NEW, { message: result.message });
 
       // A backgrounded app keeps its socket alive, so presence can't tell whether the app is

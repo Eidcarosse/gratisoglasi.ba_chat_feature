@@ -24,8 +24,11 @@ export class Gateway {
   attach(io) {
     this.io = io;
   }
-  emitToConversation(conversationId, event, payload) {
-    this.io?.to(convRoom(conversationId)).emit(event, payload);
+  emitToConversation(conversationId, event, payload, { excludeUserId } = {}) {
+    if (!this.io) return;
+    const broadcast = this.io.to(convRoom(conversationId));
+    const target = excludeUserId ? broadcast.except(userRoom(excludeUserId)) : broadcast;
+    target.emit(event, payload);
   }
   emitToUser(userId, event, payload) {
     this.io?.to(userRoom(userId)).emit(event, payload);
