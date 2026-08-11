@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import request from 'supertest';
 import { randomUUID } from 'node:crypto';
 import mongoose from 'mongoose';
-import { bootTestApp, seedUser, seedItem, updateItem } from './helpers/app.js';
+import { bootTestApp, seedUser, seedItem, updateItem, deleteItem } from './helpers/app.js';
 import { GratisRepository } from '../src/integrations/gratis/gratis.repository.js';
 
 let ctx;
@@ -120,10 +120,46 @@ describe('GET /conversations/:id (open) + membership + open-refresh', () => {
 
     const opened = await request(app).get(`/conversations/${convId}`).set(auth(buyerId));
     expect(opened.body.conversation.item.price).toBe(250); // live overlay
+    expect(opened.body.conversation.itemDeleted).toBe(false);
+    expect(opened.body.conversation.itemAvailable).toBe(true);
 
     const inbox = await request(app).get('/conversations').set(auth(buyerId));
     const row = inbox.body.conversations.find((c) => c._id === convId);
     expect(row.item.price).toBeNull(); // snapshot unchanged (taken at creation, price was null)
+  });
+
+  it('flags a hard-deleted ad on open while keeping the stored snapshot', async () => {
+    // A throwaway item so the hard delete cannot affect the other tests' conversation.
+    const doomedItemId = await seedItem(ctx, {
+      addedBy: sellerId,
+      title: 'Doomed scooter',
+      price: 120,
+      images: ['https://cdn/scooter.jpg'],
+      hidden: false,
+      status: 'Approved',
+    });
+    const created = await request(app)
+      .post('/conversations')
+      .set(auth(buyerId))
+      .send({ itemId: String(doomedItemId) });
+    const doomedConvId = created.body.conversation._id;
+
+    await deleteItem(ctx, doomedItemId);
+
+    const opened = await request(app).get(`/conversations/${doomedConvId}`).set(auth(buyerId));
+    expect(opened.status).toBe(200); // still readable — the thread outlives the ad
+    const c = opened.body.conversation;
+    expect(c.itemDeleted).toBe(true);
+    expect(c.itemLive).toBeNull();
+    expect(c.itemAvailable).toBe(false);
+    expect(c.item.title).toBe('Doomed scooter'); // snapshot survives so the header can label it
+
+    // Messaging an existing conversation stays allowed even with the ad gone.
+    const sent = await request(app)
+      .post(`/conversations/${doomedConvId}/messages`)
+      .set(auth(buyerId))
+      .send({ clientMessageId: randomUUID(), type: 'text', body: 'Is it still for sale?' });
+    expect(sent.status).toBe(201);
   });
 });
 

@@ -253,7 +253,9 @@ interface Conversation {
   // omits conversations YOU deleted, so deletedFor is not something the client needs to read.
 
   // Present ONLY on GET /conversations/:id (live overlay; not stored):
-  itemLive?: { price: number | null; status: string; hidden: boolean };
+  itemLive: { price: number | null; status: string; hidden: boolean } | null; // null = ad deleted
+  itemDeleted: boolean;   // true = the ad no longer exists on the main site
+  itemAvailable: boolean; // false when the ad is deleted OR hidden
 }
 ```
 
@@ -261,7 +263,14 @@ interface Conversation {
 **not** kept in sync. The inbox list (`GET /conversations`) returns the stored snapshot only.
 Opening a single conversation (`GET /conversations/:id`) refreshes `item.price`/`status`/
 `thumbnailUrl` from the live marketplace item and adds `itemLive` (including `hidden`). Use
-`itemLive` to show "price changed" / "listing removed" banners.
+`itemLive` to show a "price changed" banner.
+
+**Deleted ads.** Marketplace ads are hard-deleted, so an open conversation can outlive its ad.
+In that case `GET /conversations/:id` still returns `200` with the stored `item` snapshot, but
+sets `itemLive: null`, `itemDeleted: true` and `itemAvailable: false`. Gate any "View ad" link on
+`itemAvailable` — `itemDeleted` means the ad detail page will 404. Messaging in an existing
+conversation stays allowed regardless; only *starting* a new conversation on a missing/hidden ad
+is rejected (`404 Item not found` / `403 Item is not available`).
 
 ---
 

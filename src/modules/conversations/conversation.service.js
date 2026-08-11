@@ -107,6 +107,15 @@ export class ConversationService {
         thumbnailUrl: live.thumbnailUrl,
       };
       convo.itemLive = { price: live.price, status: live.status, hidden: live.hidden };
+      convo.itemAvailable = !live.hidden;
+      convo.itemDeleted = false;
+    } else {
+      // The item is gone from the main site (hard delete). Keep the stored snapshot so the client
+      // can still label the thread, but say so explicitly — an absent itemLive used to be
+      // indistinguishable from "this endpoint doesn't return it".
+      convo.itemLive = null;
+      convo.itemDeleted = true;
+      convo.itemAvailable = false;
     }
     // Directed block state (from the caller's perspective) so the client can gate its composer.
     const otherId = this.#otherParticipant(convo, userId);
