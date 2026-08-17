@@ -1,7 +1,8 @@
 /**
  * Layer: Service.
- * User-block business logic: block/unblock another user, list who the caller has blocked, and the
- * bidirectional isBlockedBetween() consulted by the message-send and conversation-create guards.
+ * User-block business logic: block/unblock another user, list both of the caller's block
+ * directions (who they blocked, and who blocked them), and the bidirectional isBlockedBetween()
+ * consulted by the message-send and conversation-create guards.
  * blockerId always comes from the authenticated identity (req.userId) — never trusted from the
  * client. Resolves main-site display data through gratisService (never .populate across
  * connections). Must NOT touch Mongoose directly — go through blockRepository.
@@ -43,20 +44,37 @@ export class BlockService {
     return this.#afterChange(blockerId, blockedId);
   }
 
-  /** List the users the caller has blocked, hydrated with their display name/avatar. */
-  async listBlocked(blockerId) {
-    const rows = await this.repo.listByBlocker(oid(blockerId));
-    const summaries = await this.gratis.getUserSummaries(rows.map((r) => r.blockedId));
-    return rows.map((r) => {
-      const userId = String(r.blockedId);
-      const summary = summaries.get(userId) || { displayName: 'User', avatarUrl: null };
+  /**
+   * Both block directions for the caller, in one query.
+   *
+   * `blocks`    — users the caller blocked, hydrated with display name/avatar (this drives the
+   *               Block/Unblock toggle, so it needs something to render).
+   * `blockedBy` — bare ids of users who blocked the caller. Ids only, deliberately: the FE uses
+   *               this to gate composers and hide content, which needs no display data, and
+   *               hydrating it would hand every user a named roster of everyone avoiding them.
+   *
+   * Neither list is stored — both are projections of the same `blocks` rows, so they are
+   * consistent by construction and there is nothing to keep in sync. Live updates ride on the
+   * `block:update` socket event emitted to both users by #afterChange.
+   *
+   * @returns {Promise<{blocks: object[], blockedBy: string[]}>}
+   */
+  async listForUser(userId) {
+    const { outgoing, incoming } = await this.repo.listBothDirections(oid(userId));
+    const summaries = await this.gratis.getUserSummaries(outgoing.map((r) => r.blockedId));
+
+    const blocks = outgoing.map((r) => {
+      const blockedId = String(r.blockedId);
+      const summary = summaries.get(blockedId) || { displayName: 'User', avatarUrl: null };
       return {
-        userId,
+        userId: blockedId,
         displayName: summary.displayName,
         avatarUrl: summary.avatarUrl,
         createdAt: r.createdAt,
       };
     });
+
+    return { blocks, blockedBy: incoming.map((r) => String(r.blockerId)) };
   }
 
   /** Bidirectional guard used by the write paths: true if either user blocked the other. */

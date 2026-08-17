@@ -708,11 +708,18 @@ again. Idempotent — unblocking a user you had not blocked still returns `200`.
 - **Error cases:** malformed `userId` → `400 VALIDATION`.
 - **Socket:** a `block:update` event is emitted to **both** users (and all your other devices).
 
-### 5.14 `GET /blocks` — list users you have blocked
+### 5.14 `GET /blocks` — both of your block directions
 
-Return the users **you** have blocked, newest first, each hydrated with display info. This lists
-only your own **outgoing** blocks. To learn whether a *specific* user has blocked **you** (or the
-full bidirectional state), use `GET /blocks/status/:userId` (§5.15) or read `conversation.blockStatus`.
+Returns **both** directions in one call: `blocks` (the users **you** blocked, hydrated with
+display info) and `blockedBy` (the ids of users who blocked **you**). Both newest-first.
+
+The two lists are projections of the same stored rows — one block row is an outgoing block for
+one user and an incoming block for the other — so they are consistent by construction and a
+single block/unblock always shows up on both sides. Nothing is stored per-direction and there is
+nothing to keep in sync.
+
+Between loads, both lists stay current from the `block:update` socket event (§7), which is
+emitted to both users on every block and unblock. Do **not** poll this endpoint.
 
 - **Auth:** required.
 - **Query:** none.
@@ -727,16 +734,23 @@ full bidirectional state), use `GET /blocks/status/:userId` (§5.15) or read `co
       "avatarUrl": "https://…/avatar.jpg",
       "createdAt": "2026-07-06T12:00:00.000Z"
     }
-  ]
+  ],
+  "blockedBy": ["64b2f0c2a1d4e5f600000333"]
 }
 ```
 
-| Field         | Type           | Notes                                                         |
-| ------------- | -------------- | ------------------------------------------------------------- |
-| `userId`      | string         | The blocked user's id.                                        |
-| `displayName` | string         | Derived server-side (falls back to `"User"`).                 |
-| `avatarUrl`   | string \| null | The blocked user's avatar, or `null`.                         |
-| `createdAt`   | ISO string     | When the block was created.                                   |
+| Field                 | Type           | Notes                                                          |
+| --------------------- | -------------- | -------------------------------------------------------------- |
+| `blocks[].userId`     | string         | The blocked user's id.                                          |
+| `blocks[].displayName`| string         | Derived server-side (falls back to `"User"`).                   |
+| `blocks[].avatarUrl`  | string \| null | The blocked user's avatar, or `null`.                           |
+| `blocks[].createdAt`  | ISO string     | When the block was created.                                     |
+| `blockedBy`           | string[]       | Ids only, of users who blocked you. See the note below.         |
+
+`blockedBy` is deliberately **ids only, with no display data**. It exists so the client can gate
+composers and hide content; rendering a named "these users blocked you" list is not the intent.
+For the full directed state against one specific user, use `GET /blocks/status/:userId` (§5.15)
+or read `conversation.blockStatus`.
 
 ### 5.15 `GET /blocks/status/:userId` — directed block status vs. one user
 
@@ -1105,7 +1119,7 @@ message` index for optimistic reconcile and dedupe of `message:new` echoes.
 | POST   | `/uploads/direct-upload`                 | ✅ (20/60s) | `{ count? }` (1–5, default 1)                                        | `200 { uploads:[{id,uploadURL}], failed, expiresInSeconds }` — then upload bytes DIRECT to Cloudflare |
 | POST   | `/devices`                               | ✅          | `{ token, platform }`                                                | `201 { ok }` — register Expo push token                                           |
 | DELETE | `/devices`                               | ✅          | `{ token }`                                                          | `200 { ok }` — unregister on logout                                               |
-| GET    | `/blocks`                                | ✅          | —                                                                    | `200 { blocks:[{ userId, displayName, avatarUrl, createdAt }] }` — users I blocked |
+| GET    | `/blocks`                                | ✅          | —                                                                    | `200 { blocks:[{ userId, displayName, avatarUrl, createdAt }], blockedBy:[userId] }` — both directions |
 | GET    | `/blocks/status/:userId`                 | ✅          | —                                                                    | `200 { status: BlockStatus }` — directed block state vs. one user                 |
 | POST   | `/blocks`                                | ✅          | `{ userId }`                                                         | `201 { ok, status }` — block a user (bidirectional; idempotent; emits block:update) |
 | DELETE | `/blocks/:userId`                        | ✅          | —                                                                    | `200 { ok, status }` — unblock (idempotent; emits block:update)                   |
@@ -1227,8 +1241,8 @@ Client guidance: gate the composer on `blockStatus` — `blockedByMe` → show "
 blocked this user" banner; `blockedByThem` → disable the composer with "This user blocked you";
 `canMessage` → allow sending. Subscribe to `block:update` to react live, and still treat a
 `403 FORBIDDEN` on send as a defensive fallback. Note this **intentionally reveals** when the other
-user has blocked you (via `blockedByThem`), unlike `GET /blocks`, which lists only your own
-outgoing blocks.
+user has blocked you (via `blockedByThem`); `GET /blocks` exposes the same fact in bulk through
+its `blockedBy` array.
 
 ### 10.6 Source-of-truth files (server)
 
