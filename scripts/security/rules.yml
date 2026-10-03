@@ -1,0 +1,48 @@
+rules:
+  - id: dynamic-code
+    message: Dynamic code execution requires independent security review.
+    languages: [javascript, typescript]
+    severity: ERROR
+    pattern-either:
+      - pattern: eval(...)
+      - pattern: (0, eval)(...)
+      - pattern: $G.eval(...)
+      - pattern: Function(...)
+      - pattern: new Function(...)
+      - pattern: Function.apply(...)
+      - pattern: Function.call(...)
+      - pattern: Function.bind(...)
+      - pattern: $X.constructor.constructor(...)
+  - id: privileged-code-loader
+    message: Process or VM execution requires independent security review.
+    languages: [javascript, typescript]
+    severity: ERROR
+    pattern-either:
+      - pattern: require('child_process')
+      - pattern: require('node:child_process')
+      - pattern: require('vm')
+      - pattern: require('node:vm')
+      - pattern: import $X from 'node:child_process'
+      - pattern: import $X from 'child_process'
+      - pattern: import $X from 'node:vm'
+      - pattern: import $X from 'vm'
+      - pattern: import('node:child_process')
+      - pattern: import('child_process')
+      - pattern: import('node:vm')
+      - pattern: import('vm')
+      - pattern: import { $X } from 'node:child_process'
+      - pattern: import * as $X from 'node:child_process'
+      - pattern: export { $X } from 'node:child_process'
+      - pattern: export * from 'node:child_process'
+      - pattern: import { $X } from 'child_process'
+      - pattern: import * as $X from 'child_process'
+      - pattern: export { $X } from 'child_process'
+      - pattern: export * from 'child_process'
+      - pattern: import { $X } from 'node:vm'
+      - pattern: import * as $X from 'node:vm'
+      - pattern: export { $X } from 'node:vm'
+      - pattern: export * from 'node:vm'
+      - pattern: import { $X } from 'vm'
+      - pattern: import * as $X from 'vm'
+      - pattern: export { $X } from 'vm'
+      - pattern: export * from 'vm'

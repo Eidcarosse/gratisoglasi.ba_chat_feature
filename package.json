@@ -1,19 +1,22 @@
 {
   "name": "marketplace-chat",
   "version": "0.1.0",
-  "description": "Marketplace chat backend — modular monolith (Express · Socket.io · MongoDB), repository-seamed for a later ScyllaDB swap and realtime-gateway extraction.",
+  "description": "Marketplace chat backend \u2014 modular monolith (Express \u00b7 Socket.io \u00b7 MongoDB), repository-seamed for a later ScyllaDB swap and realtime-gateway extraction.",
   "type": "module",
   "main": "src/server.js",
   "engines": {
     "node": ">=20"
   },
   "scripts": {
-    "start": "node src/server.js",
-    "dev": "nodemon",
+    "start": "node scripts/security/launch.cjs && node src/server.js",
+    "dev": "node scripts/security/launch.cjs && nodemon",
     "lint": "eslint src",
     "lint:fix": "eslint src --fix",
     "format": "prettier --write \"src/**/*.js\"",
-    "test": "vitest run"
+    "test": "node scripts/security/launch.cjs && vitest run tests",
+    "security:check": "node scripts/security/launch.cjs",
+    "security:test": "node scripts/security/test.cjs",
+    "security:install": "node scripts/security/launch.cjs --install"
   },
   "dependencies": {
     "bcrypt": "^5.1.1",
@@ -42,7 +45,7 @@
     "vitest": "^1.6.0"
   },
   "//LATER_dependencies": {
-    "_comment": "Add when the §10 triggers fire — not installed at MVP.",
+    "_comment": "Add when the \u00a710 triggers fire \u2014 not installed at MVP.",
     "redis": "multi-process / presence / rate-limits",
     "@socket.io/redis-adapter": "cross-node socket pub/sub",
     "firebase-admin": "FCM push (notifications)",

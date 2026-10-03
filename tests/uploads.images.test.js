@@ -10,7 +10,7 @@ import { bootTestApp } from './helpers/app.js';
 
 let ctx;
 let app;
-const TOKEN = '0123456789abcdef01234567'; // any 24-hex string authenticates under AUTH_MODE=dev
+const TOKEN = '0'.repeat(24); // any 24-hex string authenticates under AUTH_MODE=dev
 const auth = { Authorization: `Bearer ${TOKEN}` };
 
 beforeAll(async () => {

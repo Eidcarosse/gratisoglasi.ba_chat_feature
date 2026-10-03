@@ -25,3 +25,14 @@ pids/
 .idea/
 .vscode/
 *.swp
+
+# Credentials and confidential local exports
+.env
+.env.*
+!.env.example
+!.env.sample
+*.pem
+*.p12
+*.pfx
+Gratis_Oglasi_Firebase_Service_File.json
+user_details.csv
