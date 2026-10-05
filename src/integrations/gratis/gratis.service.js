@@ -30,6 +30,11 @@ export class GratisService {
     };
   }
 
+  /** True if the seller of `itemId` accepted `buyerId`'s offer on it. */
+  async hasAcceptedBid(itemId, buyerId) {
+    return this.repo.hasAcceptedBid(itemId, buyerId);
+  }
+
   /** True if a main-site user with this id exists (used to reject blocking a non-existent user). */
   async userExists(id) {
     const user = await this.repo.getUserById(id);

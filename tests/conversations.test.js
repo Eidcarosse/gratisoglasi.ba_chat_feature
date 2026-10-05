@@ -99,6 +99,93 @@ describe('POST /conversations (create / find-or-create)', () => {
   });
 });
 
+describe('POST /conversations with counterpartId (seller → accepted bidder)', () => {
+  let acceptedBuyer;
+  let pendingBuyer;
+  let offerItem;
+
+  const sellerStarts = (counterpart, caller = sellerId, item = offerItem) =>
+    request(app)
+      .post('/conversations')
+      .set(auth(caller))
+      .send({ itemId: String(item), counterpartId: String(counterpart) });
+
+  beforeAll(async () => {
+    acceptedBuyer = await seedUser(ctx, { firstname: 'Accepted', lastname: 'Buyer' });
+    pendingBuyer = await seedUser(ctx, { firstname: 'Pending', lastname: 'Buyer' });
+    offerItem = await seedItem(ctx, {
+      addedBy: sellerId,
+      title: 'Box of plates',
+      images: [],
+      hidden: false,
+      status: 'Approved',
+      bids: [
+        { bidder: acceptedBuyer, amount: 20, status: 'accepted' },
+        { bidder: pendingBuyer, amount: 15, status: 'pending' },
+      ],
+    });
+  });
+
+  it('lets the seller start a chat with an accepted bidder — same convo the buyer gets', async () => {
+    const bySeller = await sellerStarts(acceptedBuyer);
+    expect(bySeller.status).toBe(201);
+    const c = bySeller.body.conversation;
+    // Buyer first, seller second — identical to the buyer-initiated shape.
+    expect(c.participantIds.map(String)).toEqual([String(acceptedBuyer), String(sellerId)]);
+    expect(c.participants[String(acceptedBuyer)].displayName).toBe('Accepted Buyer');
+
+    const byBuyer = await request(app)
+      .post('/conversations')
+      .set(auth(acceptedBuyer))
+      .send({ itemId: String(offerItem) });
+    expect(byBuyer.status).toBe(201);
+    expect(byBuyer.body.conversation._id).toBe(c._id);
+  });
+
+  it('rejects a bidder whose offer is still pending', async () => {
+    const res = await sellerStarts(pendingBuyer);
+    expect(res.status).toBe(403);
+  });
+
+  it('rejects a user with no offer on the item', async () => {
+    const res = await sellerStarts(buyerId);
+    expect(res.status).toBe(403);
+  });
+
+  it('rejects a caller who is not the seller, even naming an accepted bidder', async () => {
+    const res = await sellerStarts(acceptedBuyer, pendingBuyer);
+    expect(res.status).toBe(403);
+  });
+
+  it('rejects a blocked pair', async () => {
+    const blockedBuyer = await seedUser(ctx, { firstname: 'Blocked', lastname: 'Buyer' });
+    const item = await seedItem(ctx, {
+      addedBy: sellerId,
+      title: 'Lamp',
+      images: [],
+      hidden: false,
+      status: 'Approved',
+      bids: [{ bidder: blockedBuyer, amount: 5, status: 'accepted' }],
+    });
+    const block = await request(app)
+      .post('/blocks')
+      .set(auth(blockedBuyer))
+      .send({ userId: String(sellerId) });
+    expect(block.status).toBeLessThan(300);
+
+    const res = await sellerStarts(blockedBuyer, sellerId, item);
+    expect(res.status).toBe(403);
+  });
+
+  it('rejects a malformed counterpartId', async () => {
+    const res = await request(app)
+      .post('/conversations')
+      .set(auth(sellerId))
+      .send({ itemId: String(offerItem), counterpartId: 'nope' });
+    expect(res.status).toBe(400);
+  });
+});
+
 describe('GET /conversations/:id (open) + membership + open-refresh', () => {
   let convId;
   beforeAll(async () => {
@@ -187,7 +274,7 @@ describe('message send updates inbox snapshot WITHOUT clobbering item/participan
 describe('read-only safety of the gratis integration', () => {
   it('exposes only read methods (no write surface)', () => {
     const methods = Object.getOwnPropertyNames(GratisRepository.prototype).filter((m) => m !== 'constructor');
-    expect(methods.sort()).toEqual(['getItemById', 'getUserById', 'getUsersByIds']);
+    expect(methods.sort()).toEqual(['getItemById', 'getUserById', 'getUsersByIds', 'hasAcceptedBid']);
     const writeish = methods.filter((m) => /create|insert|update|save|delete|remove|write/i.test(m));
     expect(writeish).toEqual([]);
   });

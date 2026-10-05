@@ -20,7 +20,7 @@ export function createConversationRoutes(container) {
     '/',
     requireAuth,
     newConversationLimiter,
-    validate({ body: z.object({ itemId: objectId }) }),
+    validate({ body: z.object({ itemId: objectId, counterpartId: objectId.optional() }) }),
     controller.create,
   );
 
