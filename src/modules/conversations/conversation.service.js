@@ -39,16 +39,30 @@ export class ConversationService {
   }
 
   /**
-   * The "Contact seller" flow. buyerId comes from the authenticated identity; sellerId is
-   * derived from the item, never trusted from the client.
+   * Two entry points onto the SAME (item, buyer-seller) conversation:
+   *   - "Contact seller": the caller is the buyer; sellerId is derived from the item.
+   *   - "Chat with buyer" (counterpartId set): the caller must be the item's seller, and the
+   *     counterpart must hold an offer on the item that the seller accepted (read from the main
+   *     site). The caller is never trusted for the seller role — it is checked against the item.
    */
-  async findOrCreate(itemId, buyerId) {
+  async findOrCreate(itemId, callerId, { counterpartId } = {}) {
     const snapshot = await this.gratis.getItemSnapshot(itemId);
     if (!snapshot) throw AppError.notFound('Item not found');
     if (snapshot.hidden) throw AppError.forbidden('Item is not available');
     if (!snapshot.sellerId) throw AppError.validation('Item has no seller');
 
     const sellerId = snapshot.sellerId;
+    let buyerId = callerId;
+    if (counterpartId) {
+      if (String(callerId) !== String(sellerId)) {
+        throw AppError.forbidden('Only the seller can start a chat with a buyer');
+      }
+      if (!(await this.gratis.hasAcceptedBid(itemId, counterpartId))) {
+        throw AppError.forbidden('Offer not accepted');
+      }
+      buyerId = String(counterpartId);
+    }
+
     if (String(buyerId) === String(sellerId)) {
       throw AppError.validation('You cannot start a conversation with yourself');
     }
@@ -107,6 +121,15 @@ export class ConversationService {
         thumbnailUrl: live.thumbnailUrl,
       };
       convo.itemLive = { price: live.price, status: live.status, hidden: live.hidden };
+      convo.itemAvailable = !live.hidden;
+      convo.itemDeleted = false;
+    } else {
+      // The item is gone from the main site (hard delete). Keep the stored snapshot so the client
+      // can still label the thread, but say so explicitly — an absent itemLive used to be
+      // indistinguishable from "this endpoint doesn't return it".
+      convo.itemLive = null;
+      convo.itemDeleted = true;
+      convo.itemAvailable = false;
     }
     // Directed block state (from the caller's perspective) so the client can gate its composer.
     const otherId = this.#otherParticipant(convo, userId);

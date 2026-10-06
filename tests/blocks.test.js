@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
 import request from 'supertest';
 import { randomUUID } from 'node:crypto';
 import { bootTestApp, seedUser, seedItem } from './helpers/app.js';
@@ -187,5 +187,81 @@ describe('block status is exposed both directions', () => {
 
     const open = await request(app).get(`/conversations/${convoId}`).set(auth(buyerId));
     expect(open.body.conversation.blockStatus.canMessage).toBe(true);
+  });
+});
+
+// GET /blocks returns both directions. The two lists are projections of the SAME rows —
+// one { blockerId, blockedId } row is an outgoing block for one user and an incoming block
+// for the other — so a single write always shows up on both sides with nothing to sync.
+describe('GET /blocks carries both directions', () => {
+  const list = (userId) => request(app).get('/blocks').set(auth(userId));
+
+  // Every case here sets up and tears down its own blocks.
+  afterEach(async () => {
+    await request(app).delete(`/blocks/${sellerId}`).set(auth(buyerId));
+    await request(app).delete(`/blocks/${buyerId}`).set(auth(sellerId));
+  });
+
+  it('starts empty on both keys for both users', async () => {
+    for (const userId of [buyerId, sellerId]) {
+      const r = await list(userId);
+      expect(r.status).toBe(200);
+      expect(r.body.blocks).toEqual([]);
+      expect(r.body.blockedBy).toEqual([]);
+    }
+  });
+
+  it('one block populates blocks for the blocker and blockedBy for the blocked user', async () => {
+    await request(app).post('/blocks').set(auth(buyerId)).send({ userId: String(sellerId) });
+
+    const asBuyer = await list(buyerId);
+    expect(asBuyer.body.blocks).toHaveLength(1);
+    expect(asBuyer.body.blocks[0].userId).toBe(String(sellerId));
+    expect(asBuyer.body.blockedBy).toEqual([]);
+
+    const asSeller = await list(sellerId);
+    expect(asSeller.body.blocks).toEqual([]);
+    expect(asSeller.body.blockedBy).toEqual([String(buyerId)]);
+  });
+
+  it('exposes blockedBy as bare ids, with no display data', async () => {
+    await request(app).post('/blocks').set(auth(buyerId)).send({ userId: String(sellerId) });
+
+    const asSeller = await list(sellerId);
+    expect(asSeller.body.blockedBy.every((id) => typeof id === 'string')).toBe(true);
+    // The hydrated shape belongs to `blocks` only — it must not leak into the incoming list.
+    expect(JSON.stringify(asSeller.body.blockedBy)).not.toContain('displayName');
+  });
+
+  it('a mutual block gives each user one entry in each list', async () => {
+    await request(app).post('/blocks').set(auth(buyerId)).send({ userId: String(sellerId) });
+    await request(app).post('/blocks').set(auth(sellerId)).send({ userId: String(buyerId) });
+
+    const asBuyer = await list(buyerId);
+    expect(asBuyer.body.blocks.map((b) => b.userId)).toEqual([String(sellerId)]);
+    expect(asBuyer.body.blockedBy).toEqual([String(sellerId)]);
+
+    const asSeller = await list(sellerId);
+    expect(asSeller.body.blocks.map((b) => b.userId)).toEqual([String(buyerId)]);
+    expect(asSeller.body.blockedBy).toEqual([String(buyerId)]);
+  });
+
+  it('unblocking clears the entry on the OTHER side too', async () => {
+    await request(app).post('/blocks').set(auth(buyerId)).send({ userId: String(sellerId) });
+    expect((await list(sellerId)).body.blockedBy).toEqual([String(buyerId)]);
+
+    await request(app).delete(`/blocks/${sellerId}`).set(auth(buyerId));
+
+    expect((await list(buyerId)).body.blocks).toEqual([]);
+    expect((await list(sellerId)).body.blockedBy).toEqual([]);
+  });
+
+  it('keeps the two directions independent', async () => {
+    // Seller blocks buyer. The buyer's own outgoing list must stay empty.
+    await request(app).post('/blocks').set(auth(sellerId)).send({ userId: String(buyerId) });
+
+    const asBuyer = await list(buyerId);
+    expect(asBuyer.body.blocks).toEqual([]);
+    expect(asBuyer.body.blockedBy).toEqual([String(sellerId)]);
   });
 });

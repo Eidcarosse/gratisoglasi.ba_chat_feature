@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import request from 'supertest';
 import { randomUUID } from 'node:crypto';
 import mongoose from 'mongoose';
-import { bootTestApp, seedUser, seedItem, updateItem } from './helpers/app.js';
+import { bootTestApp, seedUser, seedItem, updateItem, deleteItem } from './helpers/app.js';
 import { GratisRepository } from '../src/integrations/gratis/gratis.repository.js';
 
 let ctx;
@@ -99,6 +99,93 @@ describe('POST /conversations (create / find-or-create)', () => {
   });
 });
 
+describe('POST /conversations with counterpartId (seller → accepted bidder)', () => {
+  let acceptedBuyer;
+  let pendingBuyer;
+  let offerItem;
+
+  const sellerStarts = (counterpart, caller = sellerId, item = offerItem) =>
+    request(app)
+      .post('/conversations')
+      .set(auth(caller))
+      .send({ itemId: String(item), counterpartId: String(counterpart) });
+
+  beforeAll(async () => {
+    acceptedBuyer = await seedUser(ctx, { firstname: 'Accepted', lastname: 'Buyer' });
+    pendingBuyer = await seedUser(ctx, { firstname: 'Pending', lastname: 'Buyer' });
+    offerItem = await seedItem(ctx, {
+      addedBy: sellerId,
+      title: 'Box of plates',
+      images: [],
+      hidden: false,
+      status: 'Approved',
+      bids: [
+        { bidder: acceptedBuyer, amount: 20, status: 'accepted' },
+        { bidder: pendingBuyer, amount: 15, status: 'pending' },
+      ],
+    });
+  });
+
+  it('lets the seller start a chat with an accepted bidder — same convo the buyer gets', async () => {
+    const bySeller = await sellerStarts(acceptedBuyer);
+    expect(bySeller.status).toBe(201);
+    const c = bySeller.body.conversation;
+    // Buyer first, seller second — identical to the buyer-initiated shape.
+    expect(c.participantIds.map(String)).toEqual([String(acceptedBuyer), String(sellerId)]);
+    expect(c.participants[String(acceptedBuyer)].displayName).toBe('Accepted Buyer');
+
+    const byBuyer = await request(app)
+      .post('/conversations')
+      .set(auth(acceptedBuyer))
+      .send({ itemId: String(offerItem) });
+    expect(byBuyer.status).toBe(201);
+    expect(byBuyer.body.conversation._id).toBe(c._id);
+  });
+
+  it('rejects a bidder whose offer is still pending', async () => {
+    const res = await sellerStarts(pendingBuyer);
+    expect(res.status).toBe(403);
+  });
+
+  it('rejects a user with no offer on the item', async () => {
+    const res = await sellerStarts(buyerId);
+    expect(res.status).toBe(403);
+  });
+
+  it('rejects a caller who is not the seller, even naming an accepted bidder', async () => {
+    const res = await sellerStarts(acceptedBuyer, pendingBuyer);
+    expect(res.status).toBe(403);
+  });
+
+  it('rejects a blocked pair', async () => {
+    const blockedBuyer = await seedUser(ctx, { firstname: 'Blocked', lastname: 'Buyer' });
+    const item = await seedItem(ctx, {
+      addedBy: sellerId,
+      title: 'Lamp',
+      images: [],
+      hidden: false,
+      status: 'Approved',
+      bids: [{ bidder: blockedBuyer, amount: 5, status: 'accepted' }],
+    });
+    const block = await request(app)
+      .post('/blocks')
+      .set(auth(blockedBuyer))
+      .send({ userId: String(sellerId) });
+    expect(block.status).toBeLessThan(300);
+
+    const res = await sellerStarts(blockedBuyer, sellerId, item);
+    expect(res.status).toBe(403);
+  });
+
+  it('rejects a malformed counterpartId', async () => {
+    const res = await request(app)
+      .post('/conversations')
+      .set(auth(sellerId))
+      .send({ itemId: String(offerItem), counterpartId: 'nope' });
+    expect(res.status).toBe(400);
+  });
+});
+
 describe('GET /conversations/:id (open) + membership + open-refresh', () => {
   let convId;
   beforeAll(async () => {
@@ -120,10 +207,46 @@ describe('GET /conversations/:id (open) + membership + open-refresh', () => {
 
     const opened = await request(app).get(`/conversations/${convId}`).set(auth(buyerId));
     expect(opened.body.conversation.item.price).toBe(250); // live overlay
+    expect(opened.body.conversation.itemDeleted).toBe(false);
+    expect(opened.body.conversation.itemAvailable).toBe(true);
 
     const inbox = await request(app).get('/conversations').set(auth(buyerId));
     const row = inbox.body.conversations.find((c) => c._id === convId);
     expect(row.item.price).toBeNull(); // snapshot unchanged (taken at creation, price was null)
+  });
+
+  it('flags a hard-deleted ad on open while keeping the stored snapshot', async () => {
+    // A throwaway item so the hard delete cannot affect the other tests' conversation.
+    const doomedItemId = await seedItem(ctx, {
+      addedBy: sellerId,
+      title: 'Doomed scooter',
+      price: 120,
+      images: ['https://cdn/scooter.jpg'],
+      hidden: false,
+      status: 'Approved',
+    });
+    const created = await request(app)
+      .post('/conversations')
+      .set(auth(buyerId))
+      .send({ itemId: String(doomedItemId) });
+    const doomedConvId = created.body.conversation._id;
+
+    await deleteItem(ctx, doomedItemId);
+
+    const opened = await request(app).get(`/conversations/${doomedConvId}`).set(auth(buyerId));
+    expect(opened.status).toBe(200); // still readable — the thread outlives the ad
+    const c = opened.body.conversation;
+    expect(c.itemDeleted).toBe(true);
+    expect(c.itemLive).toBeNull();
+    expect(c.itemAvailable).toBe(false);
+    expect(c.item.title).toBe('Doomed scooter'); // snapshot survives so the header can label it
+
+    // Messaging an existing conversation stays allowed even with the ad gone.
+    const sent = await request(app)
+      .post(`/conversations/${doomedConvId}/messages`)
+      .set(auth(buyerId))
+      .send({ clientMessageId: randomUUID(), type: 'text', body: 'Is it still for sale?' });
+    expect(sent.status).toBe(201);
   });
 });
 
@@ -151,7 +274,7 @@ describe('message send updates inbox snapshot WITHOUT clobbering item/participan
 describe('read-only safety of the gratis integration', () => {
   it('exposes only read methods (no write surface)', () => {
     const methods = Object.getOwnPropertyNames(GratisRepository.prototype).filter((m) => m !== 'constructor');
-    expect(methods.sort()).toEqual(['getItemById', 'getUserById', 'getUsersByIds']);
+    expect(methods.sort()).toEqual(['getItemById', 'getUserById', 'getUsersByIds', 'hasAcceptedBid']);
     const writeish = methods.filter((m) => /create|insert|update|save|delete|remove|write/i.test(m));
     expect(writeish).toEqual([]);
   });

@@ -1,6 +1,6 @@
 /**
  * Layer: Transport (REST controller).
- * Block endpoints (list blocked users, block a user, unblock a user): validate input, take the
+ * Block endpoints (list both block directions, block a user, unblock a user): validate input, take the
  * blocker identity from req.userId (never the body), call blockService, shape the response.
  * Must NOT hold business logic or touch the DB.
  */
@@ -8,10 +8,11 @@ import { asyncHandler } from '../../common/errors/asyncHandler.js';
 
 export function createBlockController({ blockService }) {
   return {
-    // GET /blocks — the caller's blocked-user list (hydrated with display data).
+    // GET /blocks — both block directions for the caller: `blocks` (users they blocked, hydrated
+    // with display data) and `blockedBy` (ids of users who blocked them).
     list: asyncHandler(async (req, res) => {
-      const blocks = await blockService.listBlocked(req.userId);
-      res.json({ blocks });
+      const { blocks, blockedBy } = await blockService.listForUser(req.userId);
+      res.json({ blocks, blockedBy });
     }),
 
     // POST /blocks { userId } — block a user. blockerId = authenticated caller. Echoes the

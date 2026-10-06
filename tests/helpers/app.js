@@ -62,3 +62,8 @@ export async function seedItem(ctx, fields) {
 export async function updateItem(ctx, id, set) {
   await ctx.SeedItem.updateOne({ _id: id }, { $set: set });
 }
+
+/** Hard-delete a seeded item, the way the main site deletes ads (findByIdAndDelete). */
+export async function deleteItem(ctx, id) {
+  await ctx.SeedItem.deleteOne({ _id: id });
+}

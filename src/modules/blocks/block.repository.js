@@ -1,8 +1,9 @@
 /**
  * Layer: Repository (BlockRepository — Mongo impl).
- * Data access for user blocks: idempotent create (upsert), remove, list-by-blocker, and the
- * bidirectional existsBetween used by the write-path guards. The only place BlockModel is
- * read/written. Reads use .lean(). Must NOT hold business logic.
+ * Data access for user blocks: idempotent create (upsert), remove, listBothDirections (the
+ * caller's outgoing and incoming blocks), and the bidirectional existsBetween used by the
+ * write-path guards. The only place BlockModel is read/written. Reads use .lean(). Must NOT
+ * hold business logic.
  */
 import { BlockModel } from './block.model.js';
 
@@ -24,9 +25,32 @@ export class BlockRepository {
     return BlockModel.deleteOne({ blockerId, blockedId });
   }
 
-  /** All users this blocker has blocked, newest first. */
-  async listByBlocker(blockerId) {
-    return BlockModel.find({ blockerId }).sort({ createdAt: -1 }).lean();
+  /**
+   * Both of a user's block directions in ONE query: the rows where they are the blocker
+   * (outgoing) and the rows where they are the blocked (incoming). These are two projections
+   * of the SAME rows — a row { blockerId: A, blockedId: B } is simultaneously an outgoing block
+   * for A and an incoming block for B — so the two lists cannot drift apart. Nothing is stored
+   * per-direction and nothing needs syncing.
+   *
+   * Both existing indexes serve this: { blockerId, blockedId } on its prefix for the outgoing
+   * side, { blockedId } for the incoming side.
+   *
+   * @returns {Promise<{outgoing: object[], incoming: object[]}>} both newest-first
+   */
+  async listBothDirections(userId) {
+    const rows = await BlockModel.find({
+      $or: [{ blockerId: userId }, { blockedId: userId }],
+    })
+      .sort({ createdAt: -1 })
+      .lean();
+
+    const outgoing = [];
+    const incoming = [];
+    for (const row of rows) {
+      if (String(row.blockerId) === String(userId)) outgoing.push(row);
+      else incoming.push(row);
+    }
+    return { outgoing, incoming };
   }
 
   /**

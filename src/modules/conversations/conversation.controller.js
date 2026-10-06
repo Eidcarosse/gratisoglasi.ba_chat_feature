@@ -8,9 +8,12 @@ import { asyncHandler } from '../../common/errors/asyncHandler.js';
 
 export function createConversationController({ conversationService }) {
   return {
-    // POST /conversations { itemId } — buyerId = authenticated user; seller derived from item.
+    // POST /conversations { itemId, counterpartId? } — without counterpartId the caller is the
+    // buyer; with it the caller must be the seller and counterpartId an accepted bidder.
     create: asyncHandler(async (req, res) => {
-      const convo = await conversationService.findOrCreate(req.body.itemId, req.userId);
+      const convo = await conversationService.findOrCreate(req.body.itemId, req.userId, {
+        counterpartId: req.body.counterpartId,
+      });
       res.status(201).json({ conversation: convo });
     }),
 

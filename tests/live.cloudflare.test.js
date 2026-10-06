@@ -17,13 +17,12 @@ import { fileURLToPath } from 'node:url';
 import dotenv from 'dotenv';
 // Vitest does NOT auto-load .env into process.env, so load it explicitly (by absolute path) at
 // module-eval time — BEFORE bootTestApp() dynamically imports config, which reads these vars.
-dotenv.config({ path: path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../.env') });
+const RUN = process.env.RUN_LIVE_CF === '1';
+if (RUN) dotenv.config({ path: path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../.env') });
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import request from 'supertest';
 import { bootTestApp } from './helpers/app.js';
-
-const RUN = process.env.RUN_LIVE_CF === '1';
 
 // A valid 1x1 grayscale PNG (verified accepted by Cloudflare Images' strict decoder).
 const PNG_1x1 = Buffer.from(
@@ -69,7 +68,7 @@ async function uploadToCloudflare(uploadURL, bytes, filename) {
 describe.skipIf(!RUN)('LIVE: direct-upload → client → Cloudflare (real)', () => {
   let ctx;
   let app;
-  const token = '0123456789abcdef01234567'; // dev-mode auth: token === userId
+  const token = '0'.repeat(24); // dev-mode auth: token === userId
   const createdIds = [];
 
   beforeAll(async () => {

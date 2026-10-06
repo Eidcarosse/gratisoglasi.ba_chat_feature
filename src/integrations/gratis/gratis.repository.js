@@ -20,6 +20,18 @@ export class GratisRepository {
     return this.Item.findById(id).lean();
   }
 
+  /** True if `bidderId` has an offer on item `itemId` that the seller accepted. */
+  async hasAcceptedBid(itemId, bidderId) {
+    if (!mongoose.Types.ObjectId.isValid(itemId) || !mongoose.Types.ObjectId.isValid(bidderId)) {
+      return false;
+    }
+    const hit = await this.Item.exists({
+      _id: itemId,
+      bids: { $elemMatch: { bidder: bidderId, status: 'accepted' } },
+    });
+    return Boolean(hit);
+  }
+
   async getUserById(id) {
     if (!mongoose.Types.ObjectId.isValid(id)) return null;
     return this.User.findById(id).lean();
