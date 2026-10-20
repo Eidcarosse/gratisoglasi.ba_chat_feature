@@ -29,15 +29,12 @@ import { GratisService } from '../integrations/gratis/gratis.service.js';
 
 import { BlockRepository } from '../modules/blocks/block.repository.js';
 import { BlockService } from '../modules/blocks/block.service.js';
-import { BlockModel } from '../modules/blocks/block.model.js';
 
 import { ConversationRepository } from '../modules/conversations/conversation.repository.js';
 import { ConversationService } from '../modules/conversations/conversation.service.js';
-import { ConversationModel } from '../modules/conversations/conversation.model.js';
 
 import { MongoMessageRepository } from '../modules/messages/message.repository.mongo.js';
 import { MessageService } from '../modules/messages/message.service.js';
-import { MessageModel } from '../modules/messages/message.model.js';
 
 import { MemoryPresenceStore } from '../modules/presence/presence.store.memory.js';
 import { PresenceService } from '../modules/presence/presence.service.js';
@@ -45,7 +42,6 @@ import { PresenceService } from '../modules/presence/presence.service.js';
 import { NotificationService } from '../modules/notifications/notification.service.js';
 import { DeviceRepository } from '../modules/notifications/device.repository.js';
 import { ExpoPushProvider } from '../modules/notifications/push.provider.js';
-import { DeviceModel } from '../modules/notifications/device.model.js';
 
 import { CloudflareImagesClient } from '../modules/uploads/cloudflareImages.client.js';
 import { UploadService } from '../modules/uploads/upload.service.js';
@@ -53,6 +49,7 @@ import { UploadService } from '../modules/uploads/upload.service.js';
 import { Gateway } from '../realtime/gateway.js';
 
 export function buildContainer({ chatConn, gratisConn }) {
+  // Both names are the one shared-database connection (loaders/db.js).
   const transactionRunner = new MongoTransactionRunner(chatConn);
 
   // --- Auth verifier seam ---
@@ -88,7 +85,10 @@ export function buildContainer({ chatConn, gratisConn }) {
   }
 
   // --- Conversations ---
-  const conversationRepository = new ConversationRepository();
+  const conversationRepository = new ConversationRepository({
+    getUserSummaries: (ids) => gratisService.getUserSummaries(ids),
+    getItemStatuses: (ids) => gratisService.getItemStatuses(ids),
+  });
   const conversationService = new ConversationService({
     conversationRepository,
     messageRepository,
@@ -152,14 +152,7 @@ export function buildContainer({ chatConn, gratisConn }) {
     pushProvider,
     uploadService,
     gateway,
-    // models (for index sync)
-    models: [BlockModel, ConversationModel, MessageModel, DeviceModel],
   };
-}
-
-/** Build the indexes declared on the chat-DB models. Awaited at boot and in tests. */
-export async function syncChatIndexes(container) {
-  await Promise.all(container.models.map((m) => m.syncIndexes()));
 }
 
 export default buildContainer;

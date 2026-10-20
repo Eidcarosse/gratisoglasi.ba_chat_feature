@@ -50,7 +50,7 @@ describe('POST /conversations (create / find-or-create)', () => {
     expect(res.status).toBe(201);
     const c = res.body.conversation;
     expect(c.item.title).toBe('Vintage bike');
-    expect(c.item.thumbnailUrl).toBe('https://cdn/bike1.jpg'); // images[0]
+    expect(c.item.thumbnailUrl).toBe('https://imagedelivery.net/testhash/bike1/public'); // images[0], built from the stored image id
     expect(c.item.price).toBeNull(); // null passes through
     expect(c.item.status).toBe('Approved');
     expect(String(c.item.sellerId)).toBe(String(sellerId));
@@ -274,7 +274,7 @@ describe('message send updates inbox snapshot WITHOUT clobbering item/participan
 describe('read-only safety of the gratis integration', () => {
   it('exposes only read methods (no write surface)', () => {
     const methods = Object.getOwnPropertyNames(GratisRepository.prototype).filter((m) => m !== 'constructor');
-    expect(methods.sort()).toEqual(['getItemById', 'getUserById', 'getUsersByIds', 'hasAcceptedBid']);
+    expect(methods.sort()).toEqual(['getItemById', 'getItemsByIds', 'getUserById', 'getUsersByIds', 'hasAcceptedBid']);
     const writeish = methods.filter((m) => /create|insert|update|save|delete|remove|write/i.test(m));
     expect(writeish).toEqual([]);
   });

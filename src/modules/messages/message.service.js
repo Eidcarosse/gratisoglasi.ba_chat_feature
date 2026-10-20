@@ -11,17 +11,11 @@
 import mongoose from 'mongoose';
 import { EVENTS } from '../../realtime/events.js';
 import { messagesSent, pushRecipientOnline } from '../../common/metrics.js';
-import { LIMITS } from '../../config/constants.js';
+import { config } from '../../config/index.js';
 import { AppError } from '../../common/errors/AppError.js';
 
 const oid = (v) => new mongoose.Types.ObjectId(v);
-const CHAT_TTL_MS = LIMITS.CHAT_TTL_DAYS * 24 * 60 * 60 * 1000;
-
-// Minimal stored-XSS guard for text bodies: neutralize angle brackets. The client renders text,
-// never HTML, but defense-in-depth is cheap.
-function sanitizeBody(body) {
-  return typeof body === 'string' ? body.replace(/</g, '&lt;').replace(/>/g, '&gt;') : '';
-}
+const CHAT_TTL_MS = config.CHAT_TTL_DAYS * 24 * 60 * 60 * 1000; // 0 disables expiry
 
 export class MessageService {
   constructor({
@@ -44,7 +38,20 @@ export class MessageService {
     this.transactions = transactionRunner;
   }
 
-  async send({ conversationId, senderId, clientMessageId, type, body, attachments = [] }) {
+  async send(input) {
+    try {
+      return await this.#send(input);
+    } catch (err) {
+      // Two concurrent sends of the same clientMessageId: the loser hits the unique { roomId, clientMessageId }
+      // index, which aborts its transaction. Treat it as the idempotent resend it is — return the stored copy.
+      if (err?.code !== 11000) throw err;
+      const existing = await this.repo.findByClientMessageId(oid(input.conversationId), input.clientMessageId);
+      if (!existing) throw err;
+      return existing;
+    }
+  }
+
+  async #send({ conversationId, senderId, clientMessageId, type, body, attachments = [] }) {
     const result = await this.transactions.run(async (session) => {
       // Authorize: membership is the real guard (identity is spoofable under dev-trust). Read the
       // conversation in this same transaction as the append/update so a concurrent final delete
@@ -66,11 +73,13 @@ export class MessageService {
         senderId: oid(senderId),
         clientMessageId,
         type,
-        body: type === 'text' ? sanitizeBody(body) : (body ?? ''),
+        // Stored RAW in the shared DB; the repository escapes angle brackets on the way out (message.mapper.js),
+        // so REST, socket and push payloads are the same as before.
+        body: type === 'text' ? (body ?? '') : '',
         attachments,
         createdAt,
         // Messages age out independently, 30 days after they were actually sent.
-        expiresAt: new Date(createdAt.getTime() + CHAT_TTL_MS),
+        expiresAt: CHAT_TTL_MS > 0 ? new Date(createdAt.getTime() + CHAT_TTL_MS) : null,
       };
 
       const { message, created } = await this.repo.append(doc, { session });

@@ -14,21 +14,21 @@ afterAll(async () => {
   await ctx.shutdown();
 });
 
-describe('health endpoints (two-connection /readyz)', () => {
+describe('health endpoints (shared-database /readyz)', () => {
   it('/healthz is liveness-only and always ok', async () => {
     const res = await request(app).get('/healthz');
     expect(res.status).toBe(200);
     expect(res.body.status).toBe('ok');
   });
 
-  it('/readyz is ready when BOTH connections are up', async () => {
+  it('/readyz is ready when the shared database connection is up', async () => {
     const res = await request(app).get('/readyz');
     expect(res.status).toBe(200);
     expect(res.body.status).toBe('ready');
   });
 
-  it('/readyz flips to 503 when the gratis connection drops, while /healthz stays ok', async () => {
-    await ctx.conns.gratisConn.close();
+  it('/readyz flips to 503 when the database connection drops, while /healthz stays ok', async () => {
+    await ctx.conns.chatConn.close();
     const ready = await request(app).get('/readyz');
     expect(ready.status).toBe(503);
     const live = await request(app).get('/healthz');

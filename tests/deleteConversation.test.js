@@ -107,7 +107,7 @@ describe('delete conversation (hide for me)', () => {
     expect(await historyBodies(sellerId, id)).toHaveLength(4);
   });
 
-  it('removes the conversation and messages after both participants delete it', async () => {
+  it('is soft only: when both participants delete a thread nothing is removed (the TTL ages it out later)', async () => {
     const buyer3 = await seedUser(ctx, { firstname: 'D', lastname: 'Elete', email: 'd@e.com' });
     const item3 = await seedItem(ctx, {
       addedBy: sellerId,
@@ -126,12 +126,26 @@ describe('delete conversation (hide for me)', () => {
     expect((await request(app).delete(`/conversations/${id}`).set(auth(buyer3))).status).toBe(200);
     expect((await request(app).delete(`/conversations/${id}`).set(auth(sellerId))).status).toBe(200);
 
-    expect(await mongoose.connection.collection('conversations').findOne({
+    const room = await mongoose.connection.collection('chat_rooms').findOne({
       _id: new mongoose.Types.ObjectId(id),
-    })).toBeNull();
+    });
+    expect(room).toBeTruthy();
+    expect(room.buyerArchivedAt).toBeInstanceOf(Date);
+    expect(room.sellerArchivedAt).toBeInstanceOf(Date);
+    expect(room.buyerClearedTo).toBeTruthy();
+    expect(room.sellerClearedTo).toBeTruthy();
     expect(await mongoose.connection.collection('messages').countDocuments({
-      conversationId: new mongoose.Types.ObjectId(id),
-    })).toBe(0);
+      roomId: new mongoose.Types.ObjectId(id),
+    })).toBe(1);
+    expect(await inboxHas(buyer3, id)).toBe(false);
+    expect(await inboxHas(sellerId, id)).toBe(false);
+    expect(await historyBodies(buyer3, id)).toEqual([]);
+    expect(await historyBodies(sellerId, id)).toEqual([]);
+
+    // Either side writing again brings the thread back for both; the old messages stay hidden.
+    await send(sellerId, id, 'hello again');
+    expect(await inboxHas(buyer3, id)).toBe(true);
+    expect(await historyBodies(buyer3, id)).toEqual(['hello again']);
   });
 
   it('keeps an empty conversation after both participants delete it', async () => {
@@ -152,139 +166,35 @@ describe('delete conversation (hide for me)', () => {
     expect((await request(app).delete(`/conversations/${id}`).set(auth(buyerEmpty))).status).toBe(200);
     expect((await request(app).delete(`/conversations/${id}`).set(auth(sellerId))).status).toBe(200);
 
-    const conversation = await mongoose.connection.collection('conversations').findOne({
+    const conversation = await mongoose.connection.collection('chat_rooms').findOne({
       _id: new mongoose.Types.ObjectId(id),
     });
     expect(conversation).toBeTruthy();
     expect(conversation.lastMessage).toBeNull();
+    expect(conversation.buyerClearedTo).toBeNull(); // nothing to clear on an empty thread
     expect(await mongoose.connection.collection('messages').countDocuments({
-      conversationId: new mongoose.Types.ObjectId(id),
+      roomId: new mongoose.Types.ObjectId(id),
     })).toBe(0);
   });
 
-  it('does not leave an orphan message when a send overlaps final deletion', async () => {
+  it('a send that overlaps a delete never leaves an orphan or a hidden new message', async () => {
     const buyer4 = await seedUser(ctx, { firstname: 'R', lastname: 'Ace', email: 'race@e.com' });
-    const item4 = await seedItem(ctx, {
-      addedBy: sellerId,
-      title: 'Lamp',
-      images: [],
-      hidden: false,
-      status: 'Approved',
-    });
-    const c = await request(app)
-      .post('/conversations')
-      .set(auth(buyer4))
-      .send({ itemId: String(item4) });
+    const item4 = await seedItem(ctx, { addedBy: sellerId, title: 'Lamp', images: [], hidden: false, status: 'Approved' });
+    const c = await request(app).post('/conversations').set(auth(buyer4)).send({ itemId: String(item4) });
     const id = c.body.conversation._id;
     await send(buyer4, id, 'before delete');
     expect((await request(app).delete(`/conversations/${id}`).set(auth(buyer4))).status).toBe(200);
 
-    const messageRepository = ctx.container.messageService.repo;
-    const originalAppend = messageRepository.append.bind(messageRepository);
-
-    let appendEntered;
-    const appendStarted = new Promise((resolve) => {
-      appendEntered = resolve;
-    });
-    let releaseAppend;
-    const appendReleased = new Promise((resolve) => {
-      releaseAppend = resolve;
-    });
-
-    messageRepository.append = async (...args) => {
-      const result = await originalAppend(...args);
-      appendEntered();
-      await appendReleased;
-      return result;
-    };
-
-    let sendResponse;
-    let deleteResponse;
-    try {
-      const sending = send(buyer4, id, 'in flight').then((res) => res);
-      await appendStarted;
-
-      const deleting = request(app)
-        .delete(`/conversations/${id}`)
-        .set(auth(sellerId))
-        .then((res) => res);
-      // Let the delete request enter its transaction while the send is paused after append.
-      await new Promise((resolve) => setImmediate(resolve));
-      releaseAppend();
-
-      [sendResponse, deleteResponse] = await Promise.all([sending, deleting]);
-    } finally {
-      releaseAppend();
-      messageRepository.append = originalAppend;
-    }
-
-    expect(deleteResponse.status).toBe(200);
-    // Depending on transaction ordering, the send either commits before deletion (201) or is
-    // rejected after the deleted conversation is observed (404). A committed send can also
-    // resurface the thread before the delete transaction retries; neither outcome may orphan data.
-    expect([201, 404]).toContain(sendResponse.status);
-    const conversation = await mongoose.connection.collection('conversations').findOne({
-      _id: new mongoose.Types.ObjectId(id),
-    });
-    const messageCount = await mongoose.connection.collection('messages').countDocuments({
-      conversationId: new mongoose.Types.ObjectId(id),
-    });
-    // If the conversation committed deletion, its partition must be gone. If the send won and
-    // resurfaced the conversation, its messages must still have a live parent.
-    if (conversation) expect(messageCount).toBeGreaterThan(0);
-    else expect(messageCount).toBe(0);
-  });
-
-  it('rolls back the conversation delete when message cleanup fails', async () => {
-    const buyer5 = await seedUser(ctx, { firstname: 'T', lastname: 'Ransact', email: 'tx@e.com' });
-    const item5 = await seedItem(ctx, {
-      addedBy: sellerId,
-      title: 'Chair',
-      images: [],
-      hidden: false,
-      status: 'Approved',
-    });
-    const c = await request(app)
-      .post('/conversations')
-      .set(auth(buyer5))
-      .send({ itemId: String(item5) });
-    const id = c.body.conversation._id;
-    await send(buyer5, id, 'keep me until rollback');
-    expect((await request(app).delete(`/conversations/${id}`).set(auth(buyer5))).status).toBe(200);
-
-    const messageRepository = ctx.container.messageService.repo;
-    const originalDeleteByConversation = messageRepository.deleteByConversation.bind(
-      messageRepository,
-    );
-    messageRepository.deleteByConversation = async (...args) => {
-      await originalDeleteByConversation(...args);
-      throw new Error('simulated cleanup failure');
-    };
-
-    let failed;
-    try {
-      failed = await request(app).delete(`/conversations/${id}`).set(auth(sellerId));
-    } finally {
-      messageRepository.deleteByConversation = originalDeleteByConversation;
-    }
-
-    expect(failed.status).toBe(500);
-    const restored = await mongoose.connection.collection('conversations').findOne({
-      _id: new mongoose.Types.ObjectId(id),
-    });
-    expect(restored).toBeTruthy();
-    expect(restored.deletedFor.map(String)).toEqual([String(buyer5)]);
-    expect(await mongoose.connection.collection('messages').countDocuments({
-      conversationId: new mongoose.Types.ObjectId(id),
-    })).toBe(1);
-
-    // Once cleanup is available again, the same delete completes atomically.
-    expect((await request(app).delete(`/conversations/${id}`).set(auth(sellerId))).status).toBe(200);
-    expect(await mongoose.connection.collection('conversations').findOne({
-      _id: new mongoose.Types.ObjectId(id),
-    })).toBeNull();
-    expect(await mongoose.connection.collection('messages').countDocuments({
-      conversationId: new mongoose.Types.ObjectId(id),
-    })).toBe(0);
+    const [sent, deleted] = await Promise.all([
+      send(buyer4, id, 'in flight'),
+      request(app).delete(`/conversations/${id}`).set(auth(sellerId)),
+    ]);
+    expect(sent.status).toBe(201);
+    expect(deleted.status).toBe(200);
+    const room = await mongoose.connection.collection('chat_rooms').findOne({ _id: new mongoose.Types.ObjectId(id) });
+    expect(room).toBeTruthy();
+    expect(await mongoose.connection.collection('messages').countDocuments({ roomId: room._id })).toBe(2);
+    // The message sent after the buyer's delete is visible to the buyer, whichever order the seller's delete landed in.
+    expect(await historyBodies(buyer4, id)).toEqual(['in flight']);
   });
 });

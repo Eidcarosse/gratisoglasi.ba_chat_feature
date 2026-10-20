@@ -16,8 +16,8 @@ export class DeviceRepository {
     return DeviceModel.findOneAndUpdate(
       { token },
       {
+        // createdAt is the timestamps option's (insert only); the unique token index is Fastify's.
         $set: { userId, platform, lastSeenAt: new Date() },
-        $setOnInsert: { createdAt: new Date() },
       },
       { upsert: true, new: true },
     ).lean();

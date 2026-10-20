@@ -1,71 +1,49 @@
 /**
- * Layer: Loader (was mongoose.js).
- * Builds TWO Mongoose connections:
- *   - chat   (default connection) → config.CHAT_MONGO_URI — READ-WRITE. Owns conversations,
- *            messages, devices. Index sync runs here.
- *   - gratis (separate connection) → config.GRATIS_MONGO_URI — READ-ONLY. The main-site Gratis
- *            DB (users, items). autoIndex/autoCreate are OFF so a read-only DB user is never
- *            asked to run DDL, and we never mutate the main DB.
- * Cross-DB .populate() is impossible across two connections — main-site data is resolved
- * explicitly via the gratis integration layer. Exposes connection state for /readyz.
+ * Layer: Loader.
+ * ONE Mongoose connection to the shared database (config.MONGO_URI) — the same MongoDB the Fastify BE
+ * and the legacy main BE use. Fastify's scripts/indexes.ts owns every index and collection, so this
+ * service runs with autoIndex/autoCreate OFF and never builds or syncs indexes.
+ * `chatConn` and `gratisConn` both name that single connection: the chat module code and the main-site
+ * integration keep their separate names, but there is no longer a second database.
  * Must NOT hold business logic.
  */
 import mongoose from 'mongoose';
 import { config } from '../config/index.js';
 import { logger } from '../common/logger.js';
 
-mongoose.set('strictQuery', true);
+mongoose.set('autoIndex', false);
+mongoose.set('autoCreate', false);
+// Legacy clients send ids in odd shapes; unknown filter paths must reach Mongo, not be stripped.
+mongoose.set('strictQuery', false);
 
-function wireEvents(conn, label) {
-  conn.on('connected', () => logger.info({ db: label }, 'mongo connected'));
-  conn.on('disconnected', () => logger.warn({ db: label }, 'mongo disconnected'));
-  conn.on('error', (err) => logger.error({ db: label, err }, 'mongo connection error'));
-}
+let conn;
 
-let chatConn;
-let gratisConn;
-
-/**
- * Connect both databases. Returns { chatConn, gratisConn }. Awaits both being ready so that
- * traffic is only served once the data layer is actually reachable.
- */
+/** Connect the shared database. Returns { chatConn, gratisConn } (the same connection twice). */
 export async function connectDatabases() {
-  // Default connection (mongoose.connection) → chat DB. Using the default connection lets chat
-  // models register via the plain `mongoose.model(...)` registry.
-  await mongoose.connect(config.CHAT_MONGO_URI, {
-    serverSelectionTimeoutMS: 10_000,
-  });
-  chatConn = mongoose.connection;
-  wireEvents(chatConn, 'chat');
-
-  // Separate, read-only connection → main Gratis DB. Never syncs indexes / creates collections.
-  gratisConn = mongoose.createConnection(config.GRATIS_MONGO_URI, {
+  await mongoose.connect(config.MONGO_URI, {
     serverSelectionTimeoutMS: 10_000,
     autoIndex: false,
     autoCreate: false,
   });
-  wireEvents(gratisConn, 'gratis');
-  await gratisConn.asPromise();
+  conn = mongoose.connection;
+  conn.on('connected', () => logger.info('mongo connected'));
+  conn.on('disconnected', () => logger.warn('mongo disconnected'));
+  conn.on('error', (err) => logger.error({ err }, 'mongo connection error'));
 
-  logger.info('both database connections established');
-  return { chatConn, gratisConn };
+  logger.info('database connection established');
+  return getConnections();
 }
 
 export function getConnections() {
-  return { chatConn, gratisConn };
+  return { chatConn: conn, gratisConn: conn };
 }
 
-/**
- * Readiness probe for /readyz: ready only when BOTH connections report connected (readyState 1).
- */
+/** Readiness probe for /readyz: ready only when the connection reports connected (readyState 1). */
 export function databasesReady() {
-  return chatConn?.readyState === 1 && gratisConn?.readyState === 1;
+  return conn?.readyState === 1;
 }
 
 export async function closeDatabases() {
-  await Promise.allSettled([
-    chatConn ? mongoose.disconnect() : Promise.resolve(),
-    gratisConn ? gratisConn.close() : Promise.resolve(),
-  ]);
-  logger.info('database connections closed');
+  if (conn) await mongoose.disconnect();
+  logger.info('database connection closed');
 }

@@ -4,8 +4,9 @@
  * with zod, and exports a frozen `config` object. FAILS FAST on boot if any required var is
  * missing or malformed — nothing else in the app should read process.env directly.
  *
- * Soft-shell topology (see plan): the chat owns its own DB (CHAT_MONGO_URI) and reads the
- * main-site Gratis DB read-only (GRATIS_MONGO_URI). Auth is a verifier seam selected by
+ * Shared-database topology: the chat service uses the SAME MongoDB as the Fastify BE and the legacy
+ * main BE (MONGO_URI) — users, ads and bids are read from it, chat_rooms / messages / blocks / devices
+ * are shared with Fastify. Fastify's scripts/indexes.ts owns every index. Auth is a verifier seam selected by
  * AUTH_MODE (dev-trust today, jwt later). There is NO chat-side login, so no registration
  * JWT secrets live here.
  */
@@ -18,9 +19,16 @@ const envSchema = z
     NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
     PORT: z.coerce.number().int().positive().default(3000),
 
-    // Two-connection topology.
-    CHAT_MONGO_URI: z.string().min(1, 'CHAT_MONGO_URI is required'),
-    GRATIS_MONGO_URI: z.string().min(1, 'GRATIS_MONGO_URI is required'),
+    // The one shared database (same URI as the Fastify BE and the legacy main BE).
+    MONGO_URI: z.string().min(1, 'MONGO_URI is required'),
+
+    // Chat retention in days: each message expires this long after it is sent, a room lives until its
+    // newest message expires. 0 disables expiry. Must equal the Fastify BE's CHAT_TTL_DAYS.
+    CHAT_TTL_DAYS: z.coerce.number().int().min(0).default(30),
+
+    // Cloudflare Images delivery hash + variant: ids stored in the shared DB become URLs here. The hash must
+    // equal the one the Fastify BE and the legacy main BE use (the imagedelivery.net account hash).
+    CF_IMAGES_ACCOUNT_HASH: z.string().default('sVauOVD8CVXGq0TdeFsc0A'),
 
     // Auth verifier seam.
     AUTH_MODE: z.enum(['dev', 'jwt']).default('dev'),

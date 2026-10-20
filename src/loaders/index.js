@@ -1,6 +1,6 @@
 /**
  * Layer: Loader (composition root entry).
- * Orchestrates the boot loaders IN ORDER: config → db (both connections) → container
+ * Orchestrates the boot loaders IN ORDER: config → db (the shared connection) → container
  * (build repos + services, inject impls) → express (app, middleware, routes) → socket
  * (Socket.io server, auth middleware, register gateway). Returns the assembled
  * { app, httpServer, io, container, conns } to server.js.
@@ -8,8 +8,7 @@
  */
 import http from 'node:http';
 import { connectDatabases } from './db.js';
-import { buildContainer, syncChatIndexes } from './container.js';
-import { migrateChatRetention } from './chat.migrations.js';
+import { buildContainer } from './container.js';
 import { createExpressApp } from './express.js';
 import { attachSocket } from './socket.js';
 import { logger } from '../common/logger.js';
@@ -17,10 +16,9 @@ import { logger } from '../common/logger.js';
 export async function bootstrap() {
   // config/index.js validated env at import time (fail-fast); reaching here means it's valid.
   const conns = await connectDatabases();
-  // Backfill legacy absolute TTL dates before HTTP/socket traffic can observe the old policy.
-  await migrateChatRetention();
+  // No index sync and no data migrations here: the shared database's schema, indexes and the one-off data
+  // migration belong to the Fastify repo (scripts/indexes.ts, scripts/migrate.ts).
   const container = buildContainer(conns);
-  await syncChatIndexes(container); // build the unique {itemId, participantIds} index etc.
   const app = createExpressApp(container);
   const httpServer = http.createServer(app);
   const io = attachSocket(httpServer, container);

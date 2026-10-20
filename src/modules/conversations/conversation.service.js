@@ -9,11 +9,12 @@
  */
 import mongoose from 'mongoose';
 import { AppError } from '../../common/errors/AppError.js';
-import { LIMITS } from '../../config/constants.js';
+import { config } from '../../config/index.js';
 
 const oid = (v) => new mongoose.Types.ObjectId(v);
 const isMember = (convo, userId) => convo.participantIds.some((p) => String(p) === String(userId));
-const CHAT_TTL_MS = LIMITS.CHAT_TTL_DAYS * 24 * 60 * 60 * 1000;
+// Retention (0 disables): an empty room gets one window, then follows its newest message.
+const CHAT_TTL_MS = config.CHAT_TTL_DAYS * 24 * 60 * 60 * 1000;
 
 export class ConversationService {
   /**
@@ -72,24 +73,18 @@ export class ConversationService {
       throw AppError.forbidden('You cannot start a conversation with this user');
     }
 
-    const summaries = await this.gratis.getUserSummaries([buyerId, sellerId]);
-    const participants = {};
-    for (const [id, summary] of summaries) participants[id] = summary;
-
     return this.repo.findOrCreate({
       itemId: oid(itemId),
-      pairKey: `${String(buyerId)}:${String(sellerId)}`, // deterministic scalar dedup key
+      pairKey: `${String(buyerId)}:${String(sellerId)}`,
       participantIds: [oid(buyerId), oid(sellerId)], // deterministic order: [buyer, seller]
       item: {
         title: snapshot.title,
-        thumbnailUrl: snapshot.thumbnailUrl,
-        price: snapshot.price,
+        imageId: snapshot.imageId,
+        priceMinor: snapshot.priceMinor,
         status: snapshot.status,
-        sellerId: oid(sellerId),
       },
-      participants,
       // An empty conversation gets one retention window; each new message moves this deadline.
-      expiresAt: new Date(Date.now() + CHAT_TTL_MS),
+      expiresAt: CHAT_TTL_MS > 0 ? new Date(Date.now() + CHAT_TTL_MS) : null,
     });
   }
 
@@ -193,23 +188,8 @@ export class ConversationService {
 
       if (!updated) throw AppError.notFound('Conversation not found');
 
-      // Once both participants have cleared a message-bearing thread, nobody can see its messages
-      // anymore. Keep the conversation and its message partition in the same transaction so a
-      // failure or a concurrent send cannot leave either half of the deleted thread behind. Empty
-      // conversations are intentionally retained so they can be reused if either participant
-      // starts messaging later.
-      if (
-        updated.lastMessage?.messageId &&
-        updated.deletedFor.length === updated.participantIds.length
-      ) {
-        const removed = await this.repo.deleteIfHiddenForAll(
-          oid(conversationId),
-          updated.participantIds,
-          { session },
-        );
-        if (removed) await this.messages.deleteByConversation(oid(conversationId), { session });
-      }
-
+      // Soft only: even when both sides have cleared the thread nothing is removed here; the messages age out
+      // with the retention TTL (a new message resurfaces the thread for both).
       return updated;
     });
   }

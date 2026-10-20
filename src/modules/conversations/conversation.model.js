@@ -1,99 +1,66 @@
 /**
- * Layer: Model (Mongoose schema — chat DB).
- * conversations collection — the denormalized inbox row. Scoped to one main-site item and a
- * buyer-seller pair. Snapshots let the inbox render with ZERO cross-DB joins (item + users live
- * in the read-only Gratis DB; .populate() cannot cross connections).
- *
- *   itemId          -> main-site items._id (ObjectId, UNENFORCED cross-DB ref)
- *   participantIds  -> [buyerId, sellerId] (main-site users._id; sellerId = item.addedBy).
- *                      Deterministic order so the unique index dedups one convo per (item, pair).
- *   item            -> snapshot { title, thumbnailUrl, price (nullable), status, sellerId }
- *   participants    -> snapshot map { <userId>: { displayName, avatarUrl } }
- *   lastMessage     -> inbox preview { messageId, body, senderId, type, createdAt, deletedAt }
- *   unreadCounts    -> { <userId>: int } for O(1) badges
- *   readState       -> { <userId>: { lastReadMessageId, lastReadAt } }
- *   deletedFor      -> [userId] who "deleted for me" (hidden from their inbox; cleared on new msg)
- *   clearedAt       -> { <userId>: messageId } history watermark set on delete; reads return only
- *                      messages after it (pre-delete messages stay hidden even after resurface)
- *   mutedBy         -> [userId] who muted push for this convo (unread still increments)
- *   expiresAt       -> newest message expiry (or creation + CHAT_TTL_DAYS while empty)
- *
- * NO messages array (unbounded-array anti-pattern) — messages are their own collection.
- *
- * Dedup key: a UNIQUE index on the array `participantIds` would be MULTIKEY (enforced per
- * element), which wrongly blocks a second buyer from messaging the same seller about the same
- * item — they'd collide on (item, seller). So we dedup on a scalar `pairKey` = `${buyerId}:${sellerId}`
- * instead, and keep the array only for the (non-unique) inbox query.
- * Indexes:
- *   { participantIds: 1, updatedAt: -1 }   -> inbox query (multikey, non-unique)
- *   { itemId: 1, pairKey: 1 } unique        -> one convo per (item, buyer-seller pair)
- * Schema + indexes only; no cross-entity logic.
+ * Layer: Model (Mongoose mirror of the Fastify `chat_rooms` collection — shared DB).
+ * The chat service no longer owns a conversations collection: one chat room per (ad, buyer) is shared with
+ * the Fastify BE, with explicit buyer / seller fields instead of per-user maps. Same schema, same collection
+ * name, no indexes here (scripts/indexes.ts in the Fastify repo owns them). The legacy conversation shape the
+ * clients see is built from this by conversation.mapper.js.
  */
 import mongoose from 'mongoose';
-import { MESSAGE_TYPES } from '../../config/constants.js';
 
 const lastMessageSchema = new mongoose.Schema(
   {
-    // messageId lets a delete/unsend detect whether the removed message IS the inbox preview,
-    // so the preview can be recomputed (the messages collection has no back-pointer here).
-    messageId: { type: mongoose.Schema.Types.ObjectId },
-    body: String,
-    senderId: { type: mongoose.Schema.Types.ObjectId },
-    type: { type: String, enum: MESSAGE_TYPES },
-    createdAt: Date,
-    deletedAt: { type: Date, default: null }, // set when the previewed message was unsent
+    messageId: { type: mongoose.Schema.Types.ObjectId, required: true },
+    text: { type: String, required: true },
+    type: { type: String, enum: ['text', 'image', 'system'], required: true },
+    senderId: { type: mongoose.Schema.Types.ObjectId, required: true },
+    at: { type: Date, required: true },
   },
   { _id: false },
 );
 
-const itemSnapshotSchema = new mongoose.Schema(
+const watermarkSchema = new mongoose.Schema(
   {
-    title: String,
-    thumbnailUrl: { type: String, default: null },
-    price: { type: Number, default: null }, // nullable — main-site price may be null
-    status: { type: String, default: null },
-    sellerId: { type: mongoose.Schema.Types.ObjectId },
+    at: { type: Date, required: true },
+    messageId: { type: mongoose.Schema.Types.ObjectId, required: true },
   },
   { _id: false },
 );
 
-const conversationSchema = new mongoose.Schema(
+const chatRoomSchema = new mongoose.Schema(
   {
-    itemId: { type: mongoose.Schema.Types.ObjectId, required: true },
-    // Scalar dedup key — `${buyerId}:${sellerId}` (deterministic order). See header.
-    pairKey: { type: String, required: true },
-    participantIds: {
-      type: [mongoose.Schema.Types.ObjectId],
-      required: true,
-      validate: [(v) => v.length === 2, 'participantIds must hold exactly 2 ids at MVP'],
-    },
-    item: { type: itemSnapshotSchema, required: true },
-    // Snapshot map keyed by userId. Mixed because keys are dynamic ObjectId strings.
-    participants: { type: mongoose.Schema.Types.Mixed, default: {} },
+    adId: { type: mongoose.Schema.Types.ObjectId, ref: 'Ad', required: true },
+    buyerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+    sellerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+
+    adTitle: { type: String, required: true },
+    adImageId: { type: String, default: null },
+    adPriceMinor: { type: Number, default: null },
+
     lastMessage: { type: lastMessageSchema, default: null },
-    unreadCounts: { type: mongoose.Schema.Types.Mixed, default: {} },
-    readState: { type: mongoose.Schema.Types.Mixed, default: {} },
-    // Per-participant "delete for me": userIds here have hidden the convo from their inbox. A new
-    // message clears this (resurfaces the thread). Stored as ObjectIds (matches participantIds).
-    deletedFor: { type: [mongoose.Schema.Types.ObjectId], default: [] },
-    // Per-participant history watermark: { <userId>: <message _id> } captured when that user
-    // "deleted for me". Their message reads return only messages with _id > this, so pre-delete
-    // messages stay hidden even after the thread resurfaces. DISTINCT from deletedFor (which the
-    // resurface $pull clears) so the watermark is durable. Keyed by userId string; Mixed = dynamic keys.
-    clearedAt: { type: mongoose.Schema.Types.Mixed, default: {} },
-    // Per-participant mute: userIds here receive no PUSH for new messages (unread still counts).
-    mutedBy: { type: [mongoose.Schema.Types.ObjectId], default: [] },
-    // TTL: initially creation + CHAT_TTL_DAYS, then moved to each new message's expiry. Older
-    // messages expire first, so this cannot expire while any message is younger than retention.
-    // Mongo's TTL monitor sweeps approximately every 60 seconds.
-    expiresAt: { type: Date },
+    lastMessageAt: { type: Date, default: null },
+
+    buyerLastRead: { type: watermarkSchema, default: null },
+    sellerLastRead: { type: watermarkSchema, default: null },
+
+    buyerUnreadCount: { type: Number, default: 0 },
+    sellerUnreadCount: { type: Number, default: 0 },
+
+    buyerArchivedAt: { type: Date, default: null },
+    sellerArchivedAt: { type: Date, default: null },
+
+    buyerMutedAt: { type: Date, default: null },
+    sellerMutedAt: { type: Date, default: null },
+
+    buyerClearedTo: { type: watermarkSchema, default: null },
+    sellerClearedTo: { type: watermarkSchema, default: null },
+
+    expiresAt: { type: Date, default: null },
+
+    schemaVersion: { type: Number, default: 1 },
   },
-  { timestamps: true, minimize: false },
+  { collection: 'chat_rooms', timestamps: true, versionKey: false },
 );
 
-conversationSchema.index({ participantIds: 1, updatedAt: -1 });
-conversationSchema.index({ itemId: 1, pairKey: 1 }, { unique: true });
-conversationSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
-
-export const ConversationModel = mongoose.model('Conversation', conversationSchema);
+export const ConversationModel =
+  mongoose.models.ChatRoom || mongoose.model('ChatRoom', chatRoomSchema, 'chat_rooms');
 export default ConversationModel;

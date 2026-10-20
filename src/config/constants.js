@@ -3,10 +3,11 @@
  * Shared enums and limits — the single source of truth referenced across modules. No logic.
  */
 
+// 'file' messages are no longer sent (the shared schema has no such type); the migration stores stray
+// ones as text. 'system' only ever appears as the tombstone of an unsent message and maps back to 'text'.
 export const MESSAGE_TYPE = Object.freeze({
   TEXT: 'text',
   IMAGE: 'image',
-  FILE: 'file',
 });
 export const MESSAGE_TYPES = Object.freeze(Object.values(MESSAGE_TYPE));
 
@@ -34,9 +35,6 @@ export const LIMITS = Object.freeze({
   // At most this many conversations per conversation:sync request — caps the fan-out of DB
   // queries a single reconnect can trigger.
   MAX_SYNC_CONVERSATIONS: 50,
-  // Each message auto-deletes this many days after it was sent. A conversation's expiry follows
-  // its newest message, so the conversation remains available while it has any unexpired message.
-  CHAT_TTL_DAYS: 30,
 });
 
 // Rate-limit windows/caps (in-memory now → Redis later). New-conversation creation is throttled

@@ -1,30 +1,41 @@
 /**
- * Layer: Integration (Gratis main-site — READ-ONLY).
- * A lean Mongoose model over the main-site `items` collection, bound to the read-only `gratis`
- * connection. Only the fields the chat needs are declared. autoIndex/autoCreate off; strict
- * false to tolerate the rest of the real item document.
- *   addedBy = seller (users._id) · title · price (NULLABLE) · images[] (thumbnail = images[0])
- *   hidden (soft-delete) · status ∈ Pending|Review|Approved
- *   bids[] = offers { bidder (users._id), status ∈ pending|accepted (missing = pending) }
+ * Layer: Integration (Gratis main-site data in the shared DB).
+ * A lean read model over the shared `ads` collection (Fastify schema). Only the fields the chat needs are
+ * declared; strict false tolerates the rest of the document. autoIndex/autoCreate are off globally.
+ *   addedBy = seller · title · priceMinor (NULLABLE, integer fening) · images[] = [{ id, order }]
+ *   status ∈ active|hidden|sold|expired|deleted · moderation.state ∈ approved|pending|rejected
  */
 import mongoose from 'mongoose';
 
-const gratisItemSchema = new mongoose.Schema(
+const gratisAdSchema = new mongoose.Schema(
   {
     addedBy: mongoose.Schema.Types.ObjectId,
     title: String,
-    price: Number,
-    images: [String],
-    hidden: Boolean,
+    priceMinor: Number,
+    images: [{ _id: false, id: String, order: Number }],
     status: String,
-    bids: [{ _id: false, bidder: mongoose.Schema.Types.ObjectId, status: String }],
+    moderation: { state: String },
   },
-  { collection: 'items', strict: false, autoIndex: false, autoCreate: false },
+  { collection: 'ads', strict: false, autoIndex: false, autoCreate: false },
 );
 
-/** @param {import('mongoose').Connection} gratisConn */
-export function makeGratisItemModel(gratisConn) {
-  return gratisConn.models.GratisItem || gratisConn.model('GratisItem', gratisItemSchema, 'items');
+const gratisBidSchema = new mongoose.Schema(
+  {
+    adId: mongoose.Schema.Types.ObjectId,
+    bidderId: mongoose.Schema.Types.ObjectId,
+    status: String,
+    acceptedAt: Date,
+    rejectedAt: Date,
+  },
+  { collection: 'bids', strict: false, autoIndex: false, autoCreate: false },
+);
+
+export function makeGratisItemModel(conn = mongoose.connection) {
+  return conn.models.GratisAd || conn.model('GratisAd', gratisAdSchema, 'ads');
+}
+
+export function makeGratisBidModel(conn = mongoose.connection) {
+  return conn.models.GratisBid || conn.model('GratisBid', gratisBidSchema, 'bids');
 }
 
 export default makeGratisItemModel;

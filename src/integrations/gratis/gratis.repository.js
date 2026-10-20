@@ -1,44 +1,55 @@
 /**
- * Layer: Integration (Gratis main-site — READ-ONLY repository).
- * The ONLY place main-site documents are read. Exposes reads ONLY — there is deliberately no
- * write method on this surface, so read-only safety is structural, not merely a DB-user
- * convention. All queries are `.lean()` (plain objects, no change tracking → no accidental save).
+ * Layer: Integration (Gratis main-site data — READ-ONLY repository).
+ * The ONLY place users / ads / bids are read. Exposes reads ONLY — there is deliberately no write method on
+ * this surface, so the chat service cannot mutate main-site data by accident. All queries are `.lean()`.
  */
 import mongoose from 'mongoose';
 import { makeGratisUserModel } from './gratis.user.model.js';
-import { makeGratisItemModel } from './gratis.item.model.js';
+import { makeGratisItemModel, makeGratisBidModel } from './gratis.item.model.js';
+
+const validId = (id) => mongoose.Types.ObjectId.isValid(id);
 
 export class GratisRepository {
-  /** @param {import('mongoose').Connection} gratisConn */
-  constructor(gratisConn) {
-    this.User = makeGratisUserModel(gratisConn);
-    this.Item = makeGratisItemModel(gratisConn);
+  /** @param {import('mongoose').Connection} conn the shared connection */
+  constructor(conn) {
+    this.User = makeGratisUserModel(conn);
+    this.Item = makeGratisItemModel(conn);
+    this.Bid = makeGratisBidModel(conn);
   }
 
   async getItemById(id) {
-    if (!mongoose.Types.ObjectId.isValid(id)) return null;
+    if (!validId(id)) return null;
     return this.Item.findById(id).lean();
   }
 
-  /** True if `bidderId` has an offer on item `itemId` that the seller accepted. */
+  async getItemsByIds(ids) {
+    const valid = (ids || []).filter(validId);
+    if (valid.length === 0) return [];
+    return this.Item.find({ _id: { $in: valid } })
+      .select({ status: 1, moderation: 1 })
+      .lean();
+  }
+
+  /** True if `bidderId` has an active offer on ad `itemId` that the seller accepted (and has not since rejected). */
   async hasAcceptedBid(itemId, bidderId) {
-    if (!mongoose.Types.ObjectId.isValid(itemId) || !mongoose.Types.ObjectId.isValid(bidderId)) {
-      return false;
-    }
-    const hit = await this.Item.exists({
-      _id: itemId,
-      bids: { $elemMatch: { bidder: bidderId, status: 'accepted' } },
+    if (!validId(itemId) || !validId(bidderId)) return false;
+    const hit = await this.Bid.exists({
+      adId: itemId,
+      bidderId,
+      status: 'active',
+      acceptedAt: { $ne: null },
+      rejectedAt: null,
     });
     return Boolean(hit);
   }
 
   async getUserById(id) {
-    if (!mongoose.Types.ObjectId.isValid(id)) return null;
+    if (!validId(id)) return null;
     return this.User.findById(id).lean();
   }
 
   async getUsersByIds(ids) {
-    const valid = (ids || []).filter((id) => mongoose.Types.ObjectId.isValid(id));
+    const valid = (ids || []).filter(validId);
     if (valid.length === 0) return [];
     return this.User.find({ _id: { $in: valid } }).lean();
   }

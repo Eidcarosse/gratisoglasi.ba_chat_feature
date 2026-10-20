@@ -28,10 +28,6 @@ export class IMessageRepository {
   async softDelete(conversationId, messageId) {
     throw new Error('not implemented');
   }
-  // Permanently remove the message partition when its conversation no longer exists.
-  async deleteByConversation(conversationId, { session } = {}) {
-    throw new Error('not implemented');
-  }
 }
 
 export default IMessageRepository;

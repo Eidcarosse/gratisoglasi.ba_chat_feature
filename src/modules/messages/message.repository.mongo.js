@@ -1,18 +1,23 @@
 /**
- * Layer: Repository (IMessageRepository — Mongo impl, TODAY).
- * Backs the message contract with MessageModel:
- *   - append:   findOneAndUpdate upsert on { conversationId, clientMessageId } with $setOnInsert
- *               → safe retries (a flaky-reconnect resend is a no-op, not a duplicate).
- *   - findByConversation: { conversationId, _id < before } sort _id:-1 limit  → KEYSET, not skip.
- *   - findByClientMessageId / getById: lean lookups.
+ * Layer: Repository (IMessageRepository — shared `messages` collection).
+ * Backs the message contract with the Fastify-schema `messages` collection and keeps the legacy message
+ * shape on the way out (message.mapper.js):
+ *   - append:  one transaction inserts the message AND its `message.sent` outbox event (Fastify Decision 40).
+ *              Idempotent on { roomId, clientMessageId }: a flaky-reconnect resend returns the stored copy.
+ *   - findByConversation: keyset on `_id` (before / after / the caller's "delete for me" floor), ordered by
+ *              (createdAt, _id) so the {roomId, createdAt, _id} history index serves it.
+ *   - softDelete: the unsend tombstone (type 'system', no text, no attachments, deletedAt).
  * Must NOT hold business logic.
  */
 import mongoose from 'mongoose';
 import { IMessageRepository } from './message.repository.interface.js';
 import { MessageModel } from './message.model.js';
+import { OutboxModel } from './outbox.model.js';
+import { ConversationModel } from '../conversations/conversation.model.js';
+import { toLegacyMessage, toSharedAttachments } from './message.mapper.js';
 import { LIMITS } from '../../config/constants.js';
 
-/** Larger of two optional ObjectId lower-bounds (by hex order == BSON order); null if both absent. */
+/** Larger of two optional ObjectId lower-bounds (hex order == BSON order); null if both absent. */
 function maxObjectId(a, b) {
   if (!a) return b || null;
   if (!b) return a;
@@ -22,61 +27,93 @@ function maxObjectId(a, b) {
 export class MongoMessageRepository extends IMessageRepository {
   /** Idempotent insert. Returns { message, created } — created=false on a dedup hit. */
   async append(message, { session } = {}) {
-    const filter = {
-      conversationId: message.conversationId,
-      clientMessageId: message.clientMessageId,
-    };
-    const query = MessageModel.findOneAndUpdate(
-      filter,
-      { $setOnInsert: message },
-      { upsert: true, new: true, setDefaultsOnInsert: true, includeResultMetadata: true },
+    const roomId = message.conversationId;
+    const lookup = MessageModel.findOne({ roomId, clientMessageId: message.clientMessageId }).lean();
+    if (session) lookup.session(session);
+    const existing = await lookup;
+    if (existing) return { message: toLegacyMessage(existing), created: false };
+
+    const roomQuery = ConversationModel.findById(roomId).select({ buyerId: 1, sellerId: 1 }).lean();
+    if (session) roomQuery.session(session);
+    const room = await roomQuery;
+    const recipientId = room && String(room.buyerId) === String(message.senderId) ? room.sellerId : room?.buyerId;
+
+    const [created] = await MessageModel.create(
+      [
+        {
+          roomId,
+          senderId: message.senderId,
+          type: message.type,
+          text: message.type === 'text' ? message.body : null,
+          attachments: toSharedAttachments(message.attachments),
+          clientMessageId: message.clientMessageId,
+          deletedAt: null,
+          schemaVersion: 2,
+          createdAt: message.createdAt,
+          expiresAt: message.expiresAt ?? null,
+        },
+      ],
+      { session },
     );
-    if (session) query.session(session);
-    const res = await query;
-    const created = !res.lastErrorObject?.updatedExisting;
-    return { message: res.value.toObject(), created };
+    // This service sends its own push with the legacy payloads old apps navigate on, so the Fastify worker
+    // must not push the same message a second time (pushRequested: false).
+    await OutboxModel.create(
+      [
+        {
+          type: 'message.sent',
+          aggregateId: created._id,
+          payload: {
+            roomId,
+            senderId: message.senderId,
+            recipientId: recipientId ?? null,
+            clientMessageId: message.clientMessageId,
+            pushRequested: false,
+          },
+          runAt: new Date(),
+        },
+      ],
+      { session },
+    );
+    return { message: toLegacyMessage(created.toObject()), created: true };
   }
 
   async findByConversation(
     conversationId,
     { before, after, clearAfter, limit = LIMITS.DEFAULT_PAGE_SIZE } = {},
   ) {
-    const q = { conversationId };
+    const q = { roomId: conversationId };
     const id = {};
     if (before) id.$lt = before; // keyset history, NOT skip
-    // Lower bound = the greater of the reconnect-sync cursor (`after`) and the per-user "delete for
-    // me" watermark (`clearAfter`). Both are `_id > x`; one field can hold only one $gt, so pick the
-    // larger. ObjectId hex strings compare in the same order as BSON ObjectIds, so String() works.
+    // Lower bound = the greater of the reconnect-sync cursor (`after`) and the per-user "delete for me"
+    // floor (`clearAfter`): both are `_id > x` and one field can hold only one $gt.
     const floor = maxObjectId(after, clearAfter);
     if (floor) id.$gt = floor;
     if (Object.keys(id).length) q._id = id;
     // `after` powers reconnect-sync (oldest-first); otherwise history is newest-first.
-    const sort = after ? { _id: 1 } : { _id: -1 };
-    return MessageModel.find(q).sort(sort).limit(limit).lean();
+    const sort = after ? { createdAt: 1, _id: 1 } : { createdAt: -1, _id: -1 };
+    const rows = await MessageModel.find(q).sort(sort).limit(limit).lean();
+    return rows.map(toLegacyMessage);
   }
 
   async findByClientMessageId(conversationId, clientMessageId) {
-    return MessageModel.findOne({ conversationId, clientMessageId }).lean();
+    const row = await MessageModel.findOne({ roomId: conversationId, clientMessageId }).lean();
+    return row ? toLegacyMessage(row) : null;
   }
 
   async getById(id) {
     if (!mongoose.Types.ObjectId.isValid(id)) return null;
-    return MessageModel.findById(id).lean();
+    const row = await MessageModel.findById(id).lean();
+    return row ? toLegacyMessage(row) : null;
   }
 
-  /** Tombstone for unsend: set deletedAt, clear body + attachments. Keeps the doc (ordering). */
+  /** Tombstone for unsend (Fastify §6.8): keeps the row so ordering and read watermarks stay coherent. */
   async softDelete(conversationId, messageId) {
-    return MessageModel.findOneAndUpdate(
-      { _id: messageId, conversationId },
-      { $set: { deletedAt: new Date(), body: '', attachments: [] } },
+    const row = await MessageModel.findOneAndUpdate(
+      { _id: messageId, roomId: conversationId },
+      { $set: { type: 'system', text: null, attachments: [], deletedAt: new Date() } },
       { new: true },
     ).lean();
-  }
-
-  async deleteByConversation(conversationId, { session } = {}) {
-    const query = MessageModel.deleteMany({ conversationId });
-    if (session) query.session(session);
-    return query;
+    return row ? toLegacyMessage(row) : null;
   }
 }
 
