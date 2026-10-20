@@ -70,5 +70,6 @@ export function toLegacyConversation(room, { summaries, status = null } = {}) {
     createdAt: room.createdAt,
     updatedAt: room.updatedAt,
     expiresAt: room.expiresAt ?? undefined,
+    __v: 0, // legacy conversations were lean Mongoose documents and always carried their version key
   };
 }
