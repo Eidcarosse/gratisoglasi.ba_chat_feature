@@ -8,12 +8,12 @@
     "node": ">=20"
   },
   "scripts": {
-    "start": "node scripts/security/launch.cjs && node src/server.js",
-    "dev": "node scripts/security/launch.cjs && nodemon",
+    "start": "node src/server.js",
+    "dev": "nodemon",
     "lint": "eslint src",
     "lint:fix": "eslint src --fix",
     "format": "prettier --write \"src/**/*.js\"",
-    "test": "node scripts/security/launch.cjs && vitest run tests",
+    "test": "vitest run tests",
     "security:check": "node scripts/security/launch.cjs",
     "security:test": "node scripts/security/test.cjs",
     "security:install": "node scripts/security/launch.cjs --install"
